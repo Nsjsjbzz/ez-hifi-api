@@ -23,6 +23,16 @@ python3 main.py
 
 By default, it listens on `0.0.0.0:8000` (could be the open internet - beware!).
 
+## Notes
+
+### Region-locking
+
+Tidal appears to region lock by account, not by countryCode. Nevertheless, countryCode is still exposed for your own testing. However, the /track/ endpoint does not appear to the region-locked. This would mean that you could use the Tidal OpenAPI to request a region-locked song with countryCode (as the OpenAPI uses the countryCode parameter properly) through search/album endpoints then stream from this API.
+
+### Dolby Atmos
+
+Usually, tracks that support Atmos will have `DOLBY_ATMOS` in `mediaMetadata.tags`. To request Dolby Atmos tracks, use `quality=LOW` at the track endpoint. The returned file will usually be E-AC3 or E-AC4 (depends on Client ID/Secret used) in the usual base64-encoded JSON manifest. `audioQuality` should be `DOLBY_ATMOS` (untested).
+
 ## API Schema
 
 These responses are samples and you should host the API yourself.
@@ -160,6 +170,11 @@ Returns info about a track given ID.
 ```
 
 Where `manifest` is either base64 encoded JSON (use `"manifestMimeType": "application/vnd.tidal.bts"` to identify).
+
+> [!NOTE]
+> Dolby Atmos tracks can usually be fetched from /track/ by requesting `quality=LOW`.
+>
+> This endpoint also doesn't appear to be region-locked, whereas search is.
 
 ###### Decoded Manifest (formatted)
 
