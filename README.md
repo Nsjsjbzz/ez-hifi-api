@@ -15,6 +15,17 @@ Run `pip install -r requirements.txt` in `tidal_auth/`, then run `tidal_auth/tid
 
 Install main API dependencies with `pip install -r requirements.txt` in the project root.
 
+### Configuration
+
+You can configure the application using environment variables or an `.env` file. See `.env.example` for a template.
+
+**Proxy Configuration:**
+- `USE_PROXIES` (default: `False`): Set to `True` to enable proxy support.
+- `PROXIES_FILE` (default: `proxies.txt`): Path to a text file containing a list of proxies (one per line). Format: `http(s)://user:pass@hostname:port`
+- `ROTATE_PROXIES_ON_REFRESH` (default: `False`): Set to `True` to rotate to a new proxy when refreshing the Tidal token.
+- `MAX_RETRIES` (default: `2`): Number of times to retry a request with a new proxy if the current one fails.
+- `FALLBACK_TO_DIRECT_CONNECTION` (default: `False`): **WARNING:** If set to `True`, the app will expose the host IP if all proxies fail or `proxies.txt` is misconfigured.
+
 Run the server with:
 
 ```bash
