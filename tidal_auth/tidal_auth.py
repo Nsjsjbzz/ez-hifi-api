@@ -11,6 +11,26 @@ import rich
 
 TOKEN_FILE = Path(os.getenv("TOKEN_FILE", Path(__file__).resolve().parent.parent / "token.json"))
 
+_USER_AGENTS = [
+    "Dalvik/2.1.0 (Linux; U; Android 14; SM-S928B Build/AP2A.240905.003)",
+    "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8 Pro Build/AP2A.240905.003)",
+    "Dalvik/2.1.0 (Linux; U; Android 14; SM-G998B Build/UP1A.231005.007)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; SM-A546B Build/TP1A.220624.014)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; Pixel 7 Build/TQ3A.230901.001)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; SM-S911B Build/TP1A.220624.014)",
+    "Dalvik/2.1.0 (Linux; U; Android 12; SM-G991B Build/SP1A.210812.016)",
+    "Dalvik/2.1.0 (Linux; U; Android 12; Pixel 6 Build/SP2A.220405.004)",
+    "Dalvik/2.1.0 (Linux; U; Android 14; OnePlus CPH2423 Build/AP2A.240905.003)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; moto g84 5G Build/U1TDS33.73-27)",
+]
+
+_custom_ua = os.getenv("USER_AGENT")
+
+
+def _random_ua() -> str:
+    return _custom_ua if _custom_ua else random.choice(_USER_AGENTS)
+
+
 CLIENT_ID = base64.b64decode("ZlgySnhkbW50WldLMGl4VA==").decode("iso-8859-1")
 CLIENT_SECRET = base64.b64decode(
     "MU5tNUFmREFqeHJnSkZKYktOV0xlQXlLR1ZHbUlOdVhQUExIVlhBdnhBZz0=",
@@ -37,7 +57,7 @@ class Auth(Hifi):
     async def get_auth_response(self):
         data = {"client_id": self.client_id, "scope": self.scope}
         headers = {
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 14; SM-S928B Build/AP2A.240905.003)",
+            "User-Agent": _random_ua(),
             "Accept": "application/json",
             "Accept-Encoding": "gzip",
             "Accept-Language": "en-US,en;q=0.9",
@@ -76,7 +96,7 @@ def save_token_entry(entry):
 
 async def poll_for_authorization(url, data, auth):
     headers = {
-        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 14; SM-S928B Build/AP2A.240905.003)",
+        "User-Agent": _random_ua(),
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
         "Accept-Language": "en-US,en;q=0.9",
@@ -196,7 +216,7 @@ async def main():
 
         headers = {
             "authorization": f"Bearer {acs_tok}",
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 14; SM-S928B Build/AP2A.240905.003)",
+            "User-Agent": _random_ua(),
             "Accept": "application/json",
             "Accept-Encoding": "gzip",
             "Accept-Language": "en-US,en;q=0.9",

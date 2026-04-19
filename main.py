@@ -45,7 +45,7 @@ def _build_http_client(proxy_url: Optional[str] = None) -> httpx.AsyncClient:
     # Pack common settings into a dictionary to keep things DRY
     client_kwargs = {
         "http2": True,
-        "headers": _TIDAL_DEFAULT_HEADERS,
+        "headers": _tidal_headers(),
         "timeout": httpx.Timeout(connect=3.0, read=12.0, write=8.0, pool=12.0),
         "limits": httpx.Limits(
             max_keepalive_connections=500,
@@ -120,19 +120,46 @@ MAX_PROXY_CANDIDATES = 10
 # Maximum number of concurrent proxy tests inside get_working_proxy()
 _PROXY_TEST_CONCURRENCY = 5
 _max_retries_raw = os.getenv("MAX_RETRIES", "2")
-USER_AGENT = os.getenv(
-    "USER_AGENT",
+_USER_AGENTS = [
     "Dalvik/2.1.0 (Linux; U; Android 14; SM-S928B Build/AP2A.240905.003)",
-)
+    "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8 Pro Build/AP2A.240905.003)",
+    "Dalvik/2.1.0 (Linux; U; Android 14; SM-G998B Build/UP1A.231005.007)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; SM-A546B Build/TP1A.220624.014)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; Pixel 7 Build/TQ3A.230901.001)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; SM-S911B Build/TP1A.220624.014)",
+    "Dalvik/2.1.0 (Linux; U; Android 12; SM-G991B Build/SP1A.210812.016)",
+    "Dalvik/2.1.0 (Linux; U; Android 12; Pixel 6 Build/SP2A.220405.004)",
+    "Dalvik/2.1.0 (Linux; U; Android 14; OnePlus CPH2423 Build/AP2A.240905.003)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; moto g84 5G Build/U1TDS33.73-27)",
+]
 
-_TIDAL_DEFAULT_HEADERS = {
-    "User-Agent": USER_AGENT,
-    "Accept": "*/*",
-    "Accept-Encoding": "gzip",
-    "Accept-Language": "en-US,en;q=0.9",
-    "X-Platform": "android",
-    "X-Tidal-Platform": "android",
-}
+_custom_ua = os.getenv("USER_AGENT")
+
+
+def random_user_agent() -> str:
+    if _custom_ua:
+        return _custom_ua
+    return random.choice(_USER_AGENTS)
+
+
+USER_AGENT = random_user_agent()
+
+
+def _tidal_headers(extra: dict | None = None) -> dict:
+    h = {
+        "User-Agent": random_user_agent(),
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip",
+        "Accept-Language": "en-US,en;q=0.9",
+        "X-Platform": "android",
+        "X-Tidal-Platform": "android",
+    }
+    if extra:
+        h.update(extra)
+    return h
+
+
+_TIDAL_DEFAULT_HEADERS = _tidal_headers()
 
 DEV_MODE = os.getenv("DEV_MODE", "False").lower() in ("true", "1", "yes")
 
