@@ -4,14 +4,24 @@ import json
 import os
 import random
 import time
+import base64
+import re
+import tempfile
+import shutil
+import subprocess
+import xml.etree.ElementTree as ET
+import zipfile
+from io import BytesIO
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Union
+from pathlib import Path
 
 import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
 
 import logging
 
@@ -21,28 +31,78 @@ load_dotenv()
 
 API_VERSION = "2.10"
 
-# Shared HTTP client is created in app lifespan for connection reuse
+# Shared HTTP client
 _http_client: Optional[httpx.AsyncClient] = None
 _http_client_lock = asyncio.Lock()
-
-# One lock per credential to avoid global contention during token refreshes
 _refresh_locks: Dict[str, asyncio.Lock] = {}
-
-# Loaded credential set from token.json; each entry will be enriched with access cache
 _creds: List[dict] = []
-
-# Global semaphore to limit concurrent album track fetches across all requests
 _album_tracks_sem = asyncio.Semaphore(20)
-
-# List of proxies loaded from file at startup
 _proxies: List[str] = []
-
-# Cache of the last proxy confirmed to be working
 _last_known_good_proxy: Optional[str] = None
+
+# DASH namespace
+DASH_NS = {"mpd": "urn:mpeg:dash:schema:mpd:2011"}
+
+# User agents
+_USER_AGENTS = [
+    "Dalvik/2.1.0 (Linux; U; Android 14; SM-S928B Build/AP2A.240905.003)",
+    "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8 Pro Build/AP2A.240905.003)",
+    "Dalvik/2.1.0 (Linux; U; Android 14; SM-G998B Build/UP1A.231005.007)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; SM-A546B Build/TP1A.220624.014)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; Pixel 7 Build/TQ3A.230901.001)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; SM-S911B Build/TP1A.220624.014)",
+    "Dalvik/2.1.0 (Linux; U; Android 12; SM-G991B Build/SP1A.210812.016)",
+    "Dalvik/2.1.0 (Linux; U; Android 12; Pixel 6 Build/SP2A.220405.004)",
+    "Dalvik/2.1.0 (Linux; U; Android 14; OnePlus CPH2423 Build/AP2A.240905.003)",
+    "Dalvik/2.1.0 (Linux; U; Android 13; moto g84 5G Build/U1TDS33.73-27)",
+]
+
+_custom_ua = os.getenv("USER_AGENT")
+
+
+def random_user_agent() -> str:
+    if _custom_ua:
+        return _custom_ua
+    return random.choice(_USER_AGENTS)
+
+
+def _tidal_headers(extra: dict | None = None) -> dict:
+    h = {
+        "User-Agent": random_user_agent(),
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip",
+        "Accept-Language": "en-US,en;q=0.9",
+        "X-Platform": "android",
+        "X-Tidal-Platform": "android",
+    }
+    if extra:
+        h.update(extra)
+    return h
+
+
+_TIDAL_DEFAULT_HEADERS = _tidal_headers()
+
+DEV_MODE = os.getenv("DEV_MODE", "False").lower() in ("true", "1", "yes")
+
+_RATE_LIMIT_MAX_RETRIES = 3
+_RATE_LIMIT_BASE_DELAY = 1.0
+_RATE_LIMIT_MAX_DELAY = 10.0
+
+
+def _log_response(method: str, url: str, resp: httpx.Response):
+    if not DEV_MODE:
+        return
+    logger.info(
+        "[DEV] %s %s → %s\n  headers: %s\n  body: %s",
+        method,
+        url,
+        resp.status_code,
+        dict(resp.headers),
+        resp.text[:2000],
+    )
 
 
 def _build_http_client(proxy_url: Optional[str] = None) -> httpx.AsyncClient:
-    # Pack common settings into a dictionary to keep things DRY
     client_kwargs = {
         "http2": True,
         "headers": _tidal_headers(),
@@ -53,14 +113,9 @@ def _build_http_client(proxy_url: Optional[str] = None) -> httpx.AsyncClient:
             keepalive_expiry=30.0,
         ),
     }
-
     try:
-        # Modern httpx
         return httpx.AsyncClient(proxy=proxy_url, **client_kwargs)
     except TypeError:
-        # Legacy httpx
-        # If proxy_url is None, proxies=None is perfectly valid.
-        # If it's a string, older httpx versions require it to be a dictionary mapping.
         legacy_proxies = {"all://": proxy_url} if proxy_url else None
         return httpx.AsyncClient(proxies=legacy_proxies, **client_kwargs)
 
@@ -87,6 +142,7 @@ async def lifespan(app: FastAPI):
             await _http_client.aclose()
             _http_client = None
 
+
 app = FastAPI(
     title="HiFi-RestAPI",
     version=API_VERSION,
@@ -103,7 +159,7 @@ app.add_middleware(
 )
 
 
-# Config (defaults act as fallback if token file missing)
+# Config
 CLIENT_ID = os.getenv("CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
 REFRESH_TOKEN: Optional[str] = os.getenv("REFRESH_TOKEN")
@@ -115,78 +171,18 @@ USE_PROXIES = os.getenv("USE_PROXIES", "False").lower() in ("true", "1", "yes")
 ROTATE_PROXIES_ON_REFRESH = os.getenv("ROTATE_PROXIES_ON_REFRESH", "False").lower() in ("true", "1", "yes")
 PROXIES_FILE = os.getenv("PROXIES_FILE", "proxies.txt")
 FALLBACK_TO_DIRECT_CONNECTION = os.getenv("FALLBACK_TO_DIRECT_CONNECTION", "False").lower() in ("true", "1", "yes")
-# Maximum number of proxy candidates to test per get_working_proxy() call
 MAX_PROXY_CANDIDATES = 10
-# Maximum number of concurrent proxy tests inside get_working_proxy()
 _PROXY_TEST_CONCURRENCY = 5
 _max_retries_raw = os.getenv("MAX_RETRIES", "2")
-_USER_AGENTS = [
-    "Dalvik/2.1.0 (Linux; U; Android 14; SM-S928B Build/AP2A.240905.003)",
-    "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8 Pro Build/AP2A.240905.003)",
-    "Dalvik/2.1.0 (Linux; U; Android 14; SM-G998B Build/UP1A.231005.007)",
-    "Dalvik/2.1.0 (Linux; U; Android 13; SM-A546B Build/TP1A.220624.014)",
-    "Dalvik/2.1.0 (Linux; U; Android 13; Pixel 7 Build/TQ3A.230901.001)",
-    "Dalvik/2.1.0 (Linux; U; Android 13; SM-S911B Build/TP1A.220624.014)",
-    "Dalvik/2.1.0 (Linux; U; Android 12; SM-G991B Build/SP1A.210812.016)",
-    "Dalvik/2.1.0 (Linux; U; Android 12; Pixel 6 Build/SP2A.220405.004)",
-    "Dalvik/2.1.0 (Linux; U; Android 14; OnePlus CPH2423 Build/AP2A.240905.003)",
-    "Dalvik/2.1.0 (Linux; U; Android 13; moto g84 5G Build/U1TDS33.73-27)",
-]
-
-_custom_ua = os.getenv("USER_AGENT")
-
-
-def random_user_agent() -> str:
-    if _custom_ua:
-        return _custom_ua
-    return random.choice(_USER_AGENTS)
-
-
-USER_AGENT = random_user_agent()
-
-
-def _tidal_headers(extra: dict | None = None) -> dict:
-    h = {
-        "User-Agent": random_user_agent(),
-        "Accept": "*/*",
-        "Accept-Encoding": "gzip",
-        "Accept-Language": "en-US,en;q=0.9",
-        "X-Platform": "android",
-        "X-Tidal-Platform": "android",
-    }
-    if extra:
-        h.update(extra)
-    return h
-
-
-_TIDAL_DEFAULT_HEADERS = _tidal_headers()
-
-DEV_MODE = os.getenv("DEV_MODE", "False").lower() in ("true", "1", "yes")
-
-_RATE_LIMIT_MAX_RETRIES = 3
-_RATE_LIMIT_BASE_DELAY = 1.0
-_RATE_LIMIT_MAX_DELAY = 10.0
-
-def _log_response(method: str, url: str, resp: httpx.Response):
-    if not DEV_MODE:
-        return
-    logger.info(
-        "[DEV] %s %s → %s\n  headers: %s\n  body: %s",
-        method,
-        url,
-        resp.status_code,
-        dict(resp.headers),
-        resp.text[:2000],
-    )
-
 try:
     MAX_RETRIES = int(_max_retries_raw)
 except ValueError:
     MAX_RETRIES = 2
 if MAX_RETRIES < 1:
     MAX_RETRIES = 1
+
+
 def load_proxies():
-    """Load proxies from file into the global _proxies list."""
     global _proxies
     if not os.path.exists(PROXIES_FILE):
         logger.warning(f"Proxies file {PROXIES_FILE} not found.")
@@ -208,31 +204,22 @@ async def test_proxy(proxy_url: str) -> bool:
 
 async def get_working_proxy(avoid_proxy: Optional[str] = None) -> Optional[str]:
     global _last_known_good_proxy
-
     if not _proxies:
         return None
-
-    # Try the cached proxy first (unless it is the one we want to avoid)
     if _last_known_good_proxy and _last_known_good_proxy != avoid_proxy:
         if await test_proxy(_last_known_good_proxy):
             return _last_known_good_proxy
-
     shuffled_proxies = _proxies[:]
     random.shuffle(shuffled_proxies)
-
     if avoid_proxy:
         candidate_proxies = [p for p in shuffled_proxies if p != avoid_proxy]
         if not candidate_proxies:
             candidate_proxies = shuffled_proxies
     else:
         candidate_proxies = shuffled_proxies
-
-    # Exclude the already-tested cached proxy and cap the candidate list
     if _last_known_good_proxy:
         candidate_proxies = [p for p in candidate_proxies if p != _last_known_good_proxy]
     candidate_proxies = candidate_proxies[:MAX_PROXY_CANDIDATES]
-
-    # Test candidates concurrently, returning the first one that succeeds
     sem = asyncio.Semaphore(_PROXY_TEST_CONCURRENCY)
     found_event = asyncio.Event()
     selected_proxy: List[Optional[str]] = [None]
@@ -249,14 +236,15 @@ async def get_working_proxy(avoid_proxy: Optional[str] = None) -> Optional[str]:
                     found_event.set()
 
     await asyncio.gather(*[probe(p) for p in candidate_proxies], return_exceptions=True)
-
     if selected_proxy[0]:
         _last_known_good_proxy = selected_proxy[0]
     return selected_proxy[0]
 
+
 async def _delayed_close(client: httpx.AsyncClient):
     await asyncio.sleep(15)
     await client.aclose()
+
 
 async def update_global_client(force_new_proxy: bool = False):
     global _http_client
@@ -264,7 +252,6 @@ async def update_global_client(force_new_proxy: bool = False):
         proxy_to_avoid = None
         if force_new_proxy and _http_client and _http_client.proxy:
             proxy_to_avoid = str(_http_client.proxy.url)
-
         proxy_url = None
         if USE_PROXIES:
             proxy_url = await get_working_proxy(avoid_proxy=proxy_to_avoid)
@@ -274,18 +261,14 @@ async def update_global_client(force_new_proxy: bool = False):
                 else:
                     logger.error("Could not find a working proxy and FALLBACK_TO_DIRECT_CONNECTION is False.")
                     raise HTTPException(status_code=503, detail="Service Unavailable")
-
-        # Only create a new client if the proxy is actually different
         current_proxy_url: Optional[str] = None
         if _http_client and _http_client.proxy:
             current_proxy_url = str(_http_client.proxy.url)
         if _http_client and current_proxy_url == proxy_url:
             return
-
         new_client = _build_http_client(proxy_url)
         old_client = _http_client
         _http_client = new_client
-
         if old_client is not None:
             asyncio.create_task(_delayed_close(old_client))
 
@@ -298,21 +281,18 @@ if os.path.exists(TOKEN_FILE):
         token_data = json.load(tok)
         if isinstance(token_data, dict):
             token_data = [token_data]
-
         for entry in token_data:
             cred = {
                 "client_id": entry.get("client_ID") or CLIENT_ID,
                 "client_secret": entry.get("client_secret") or CLIENT_SECRET,
                 "refresh_token": entry.get("refresh_token") or REFRESH_TOKEN,
                 "user_id": entry.get("userID") or USER_ID,
-                # Access tokens in file have unknown expiry; force refresh on first use
                 "access_token": None,
                 "expires_at": 0,
             }
             if cred["refresh_token"]:
                 _creds.append(cred)
 
-# Add env var credential if available and unique (simple check)
 if REFRESH_TOKEN:
     env_cred = {
         "client_id": CLIENT_ID,
@@ -322,7 +302,6 @@ if REFRESH_TOKEN:
         "access_token": None,
         "expires_at": 0,
     }
-    # Avoid adding duplicate if it was already loaded from file with same refresh token
     if not any(c["refresh_token"] == REFRESH_TOKEN for c in _creds):
         _creds.append(env_cred)
 
@@ -334,7 +313,7 @@ if _creds:
 
 def _pick_credential() -> dict:
     if not _creds:
-        raise HTTPException(status_code=500, detail="No Tidal credentials available; populate token.json")
+        raise HTTPException(status_code=500, detail="No Tidal credentials available")
     return random.choice(_creds)
 
 
@@ -364,16 +343,12 @@ async def get_http_client() -> httpx.AsyncClient:
 
 
 async def refresh_tidal_token(cred: Optional[dict] = None):
-    """Refresh a token for the provided credential set."""
     cred = cred or _pick_credential()
-
     async with _lock_for_cred(cred):
         if cred["access_token"] and time.time() < cred["expires_at"]:
             return cred["access_token"]
-
         if USE_PROXIES and ROTATE_PROXIES_ON_REFRESH:
             await update_global_client(force_new_proxy=True)
-
         max_retries = MAX_RETRIES if USE_PROXIES else 1
         for attempt in range(max_retries):
             try:
@@ -389,7 +364,6 @@ async def refresh_tidal_token(cred: Optional[dict] = None):
                     auth=(cred["client_id"], cred["client_secret"]),
                 )
                 _log_response("POST", "https://auth.tidal.com/v1/oauth2/token", res)
-
                 if res.status_code in [400, 401]:
                     try:
                         error_data = res.json()
@@ -398,25 +372,22 @@ async def refresh_tidal_token(cred: Optional[dict] = None):
                             raise HTTPException(status_code=401, detail=f"Tidal Auth Error: {error_data.get('error_description')}")
                     except ValueError:
                         pass
-
                 res.raise_for_status()
                 data = res.json()
                 new_token = data["access_token"]
                 expires_in = data.get("expires_in", 3600)
-
                 cred["access_token"] = new_token
                 cred["expires_at"] = time.time() + expires_in - 60
-
                 return new_token
             except httpx.RequestError as e:
                 if USE_PROXIES and attempt < max_retries - 1:
-                    logger.warning(f"Proxy failed during token refresh: {e}. Healing proxy...")
+                    logger.warning(f"Proxy failed during token refresh: {e}")
                     await update_global_client(force_new_proxy=True)
                     continue
                 raise HTTPException(status_code=401, detail=f"Token refresh failed: {str(e)}")
             except httpx.HTTPStatusError as e:
                 if USE_PROXIES and e.response.status_code in [403, 429] and attempt < max_retries - 1:
-                    logger.warning(f"Proxy blocked during token refresh ({e.response.status_code}). Healing proxy...")
+                    logger.warning(f"Proxy blocked during token refresh ({e.response.status_code})")
                     await update_global_client(force_new_proxy=True)
                     continue
                 raise HTTPException(status_code=401, detail=f"Token refresh failed: {str(e)}")
@@ -427,12 +398,9 @@ async def get_tidal_token(force_refresh: bool = False):
 
 
 async def get_tidal_token_for_cred(force_refresh: bool = False, cred: Optional[dict] = None):
-    """Retrieve an access token for a specific credential; pick random if not provided."""
     cred = cred or _pick_credential()
-
     if not force_refresh and cred["access_token"] and time.time() < cred["expires_at"]:
         return cred["access_token"], cred
-
     token = await refresh_tidal_token(cred)
     return token, cred
 
@@ -442,18 +410,15 @@ async def make_request(url: str, token: Optional[str] = None, params: Optional[d
         token, cred = await get_tidal_token_for_cred(cred=cred)
     client = await get_http_client()
     headers = {"authorization": f"Bearer {token}"}
-
     try:
         for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
             resp = await client.get(url, headers=headers, params=params)
             _log_response("GET", url, resp)
-
             if resp.status_code == 401:
                 token, cred = await get_tidal_token_for_cred(force_refresh=True, cred=cred)
                 headers = {"authorization": f"Bearer {token}"}
                 resp = await client.get(url, headers=headers, params=params)
                 _log_response("GET (retry after 401)", url, resp)
-
             if resp.status_code == 429 and attempt < _RATE_LIMIT_MAX_RETRIES:
                 delay = min(_RATE_LIMIT_BASE_DELAY * (2 ** attempt), _RATE_LIMIT_MAX_DELAY)
                 retry_after = resp.headers.get("Retry-After")
@@ -466,7 +431,6 @@ async def make_request(url: str, token: Optional[str] = None, params: Optional[d
                 logger.warning("Upstream 429 for %s, retrying in %.1fs (attempt %d/%d)", url, delay, attempt + 1, _RATE_LIMIT_MAX_RETRIES)
                 await asyncio.sleep(delay)
                 continue
-
             if resp.status_code == 404:
                 fresh_token, fresh_cred = await get_tidal_token_for_cred(force_refresh=True, cred=cred)
                 if fresh_token != token:
@@ -474,19 +438,13 @@ async def make_request(url: str, token: Optional[str] = None, params: Optional[d
                     resp = await client.get(url, headers=headers, params=params)
                     _log_response("GET (retry after 404 token refresh)", url, resp)
                     token, cred = fresh_token, fresh_cred
-
             break
-
         resp.raise_for_status()
         return {"version": API_VERSION, "data": resp.json()}
     except httpx.HTTPStatusError as e:
-        logger.error(
-            "Upstream API error %s %s %s",
-            e.response.status_code,
-            url,
-            e.response.text[:1000],
-            exc_info=e,
-        )
+        logger.error("Upstream API error %s %s %s", e.response.status_code, url, e.response.text[:1000], exc_info=e)
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Resource not found")
         raise HTTPException(status_code=e.response.status_code, detail="Upstream API error")
     except httpx.RequestError as e:
         if isinstance(e, httpx.TimeoutException):
@@ -501,25 +459,19 @@ async def authed_get_json(
     token: Optional[str] = None,
     cred: Optional[dict] = None,
 ):
-    """Perform an authenticated GET, retrying once on 401. Returns payload with updated token/cred."""
-
     if token is None:
         token, cred = await get_tidal_token_for_cred(cred=cred)
-
     client = await get_http_client()
     headers = {"authorization": f"Bearer {token}"}
-
     try:
         for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
             resp = await client.get(url, headers=headers, params=params)
             _log_response("GET", url, resp)
-
             if resp.status_code == 401:
                 token, cred = await get_tidal_token_for_cred(force_refresh=True, cred=cred)
                 headers["authorization"] = f"Bearer {token}"
                 resp = await client.get(url, headers=headers, params=params)
                 _log_response("GET (retry after 401)", url, resp)
-
             if resp.status_code == 429 and attempt < _RATE_LIMIT_MAX_RETRIES:
                 delay = min(_RATE_LIMIT_BASE_DELAY * (2 ** attempt), _RATE_LIMIT_MAX_DELAY)
                 retry_after = resp.headers.get("Retry-After")
@@ -532,7 +484,6 @@ async def authed_get_json(
                 logger.warning("Upstream 429 for %s, retrying in %.1fs (attempt %d/%d)", url, delay, attempt + 1, _RATE_LIMIT_MAX_RETRIES)
                 await asyncio.sleep(delay)
                 continue
-
             if resp.status_code == 404:
                 fresh_token, fresh_cred = await get_tidal_token_for_cred(force_refresh=True, cred=cred)
                 if fresh_token != token:
@@ -540,33 +491,34 @@ async def authed_get_json(
                     resp = await client.get(url, headers=headers, params=params)
                     _log_response("GET (retry after 404 token refresh)", url, resp)
                     token, cred = fresh_token, fresh_cred
-
             break
-
         resp.raise_for_status()
         return resp.json(), token, cred
     except httpx.HTTPStatusError as e:
-        logger.error(
-            "Upstream API error %s %s %s",
-            e.response.status_code,
-            url,
-            e.response.text[:1000],
-            exc_info=e,
-        )
+        logger.error("Upstream API error %s %s %s", e.response.status_code, url, e.response.text[:1000], exc_info=e)
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if e.response.status_code == 429:
+            raise HTTPException(status_code=429, detail="Upstream rate limited")
         raise HTTPException(status_code=e.response.status_code, detail="Upstream API error")
     except httpx.RequestError as e:
         if isinstance(e, httpx.TimeoutException):
             raise HTTPException(status_code=429, detail="Upstream timeout")
         raise HTTPException(status_code=503, detail="Connection error to Tidal")
 
+
+# ======================== ORIGINAL API ENDPOINTS ========================
+
 @app.get("/")
 async def index():
     return {"version": API_VERSION, "Repo": "https://github.com/binimum/hifi-api"}
+
 
 @app.get("/info/")
 async def get_info(id: int):
     url = f"https://api.tidal.com/v1/tracks/{id}/"
     return await make_request(url, params={"countryCode": COUNTRY_CODE})
+
 
 @app.get("/track/")
 async def get_track(id: int, quality: str = "HI_RES_LOSSLESS", immersiveaudio: bool = False):
@@ -591,12 +543,7 @@ async def get_track_manifests(
     usage: str = Query(default="PLAYBACK")
 ):
     url = f"https://openapi.tidal.com/v2/trackManifests/{id}"
-    params = [
-        ("adaptive", adaptive),
-        ("manifestType", manifestType),
-        ("uriScheme", uriScheme),
-        ("usage", usage),
-    ]
+    params = [("adaptive", adaptive), ("manifestType", manifestType), ("uriScheme", uriScheme), ("usage", usage)]
     for f in formats:
         params.append(("formats", f))
     res = await make_request(url, params=params)
@@ -610,43 +557,38 @@ async def get_track_manifests(
         pass
     return res
 
-# Not really necessary but I'm including it anyway
+
 @app.api_route("/widevine", methods=["GET", "POST"])
 async def widevine_proxy(request: Request):
     client = await get_http_client()
     body = await request.body()
     url = "https://api.tidal.com/v2/widevine"
-
     token, cred = await get_tidal_token_for_cred()
     headers = {
         "authorization": f"Bearer {token}",
         "Content-Type": request.headers.get("Content-Type", "application/octet-stream")
     }
-
     try:
         resp = await client.request(request.method, url, headers=headers, content=body)
         _log_response(request.method, url, resp)
-
         if resp.status_code == 401:
             token, cred = await get_tidal_token_for_cred(force_refresh=True, cred=cred)
             headers["authorization"] = f"Bearer {token}"
             resp = await client.request(request.method, url, headers=headers, content=body)
             _log_response(f"{request.method} (retry)", url, resp)
-
-        return fastapi.Response(
+        return Response(
             content=resp.content,
             status_code=resp.status_code,
             headers={"Content-Type": resp.headers.get("Content-Type", "application/json")}
         )
     except Exception as e:
-        raise fastapi.HTTPException(status_code=502, detail="Error communicating with widevine server")
+        raise HTTPException(status_code=502, detail="Error communicating with widevine server")
 
 
 @app.get("/recommendations/")
 async def get_recommendations(id: int):
-    recommendations_url = f"https://api.tidal.com/v1/tracks/{id}/recommendations"
-    params = {"limit": "20", "countryCode": COUNTRY_CODE}
-    return await make_request(recommendations_url, params=params)
+    url = f"https://api.tidal.com/v1/tracks/{id}/recommendations"
+    return await make_request(url, params={"limit": "20", "countryCode": COUNTRY_CODE})
 
 
 @app.api_route("/search/", methods=["GET"])
@@ -660,61 +602,24 @@ async def search(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=25, ge=1, le=500),
 ):
-    """Search endpoint supporting track/artist/album/video/playlist queries via distinct params."""
     isrc_query = i.strip() if isinstance(i, str) else None
     if isrc_query:
         return await make_request(
             "https://api.tidal.com/v1/tracks",
-            params={
-                "isrc": isrc_query,
-                "limit": limit,
-                "offset": offset,
-                "countryCode": COUNTRY_CODE,
-            },
+            params={"isrc": isrc_query, "limit": limit, "offset": offset, "countryCode": COUNTRY_CODE},
         )
-
     queries = (
-        (s, "https://api.tidal.com/v1/search/tracks", {
-            "query": s,
-            "limit": limit,
-            "offset": offset,
-            "countryCode": COUNTRY_CODE,
-        }),
-        (a, "https://api.tidal.com/v1/search/top-hits", {
-            "query": a,
-            "limit": limit,
-            "offset": offset,
-            "types": "ARTISTS,TRACKS",
-            "countryCode": COUNTRY_CODE,
-        }),
-        (al, "https://api.tidal.com/v1/search/top-hits", {
-            "query": al,
-            "limit": limit,
-            "offset": offset,
-            "types": "ALBUMS",
-            "countryCode": COUNTRY_CODE,
-        }),
-        (v, "https://api.tidal.com/v1/search/top-hits", {
-            "query": v,
-            "limit": limit,
-            "offset": offset,
-            "types": "VIDEOS",
-            "countryCode": COUNTRY_CODE,
-        }),
-        (p, "https://api.tidal.com/v1/search/top-hits", {
-            "query": p,
-            "limit": limit,
-            "offset": offset,
-            "types": "PLAYLISTS",
-            "countryCode": COUNTRY_CODE,
-        }),
+        (s, "https://api.tidal.com/v1/search/tracks", {"query": s, "limit": limit, "offset": offset, "countryCode": COUNTRY_CODE}),
+        (a, "https://api.tidal.com/v1/search/top-hits", {"query": a, "limit": limit, "offset": offset, "types": "ARTISTS,TRACKS", "countryCode": COUNTRY_CODE}),
+        (al, "https://api.tidal.com/v1/search/top-hits", {"query": al, "limit": limit, "offset": offset, "types": "ALBUMS", "countryCode": COUNTRY_CODE}),
+        (v, "https://api.tidal.com/v1/search/top-hits", {"query": v, "limit": limit, "offset": offset, "types": "VIDEOS", "countryCode": COUNTRY_CODE}),
+        (p, "https://api.tidal.com/v1/search/top-hits", {"query": p, "limit": limit, "offset": offset, "types": "PLAYLISTS", "countryCode": COUNTRY_CODE}),
     )
-
     for value, url, params in queries:
         if value:
             return await make_request(url, params=params)
-
     raise HTTPException(status_code=400, detail="Provide one of s, a, al, v, p, or i")
+
 
 @app.get("/album/")
 async def get_album(
@@ -723,85 +628,48 @@ async def get_album(
     offset: int = Query(0, ge=0),
 ):
     token, cred = await get_tidal_token_for_cred()
-
     album_url = f"https://api.tidal.com/v1/albums/{id}"
     items_url = f"https://api.tidal.com/v1/albums/{id}/items"
 
     async def fetch(url: str, params: Optional[dict] = None):
-        payload, _, _ = await authed_get_json(
-            url,
-            params=params,
-            token=token,
-            cred=cred,
-        )
+        payload, _, _ = await authed_get_json(url, params=params, token=token, cred=cred)
         return payload
 
     tasks = [fetch(album_url, {"countryCode": COUNTRY_CODE})]
-
     max_chunk = 100
     current_offset = offset
     remaining_limit = limit
-
     while remaining_limit > 0:
         chunk_size = min(remaining_limit, max_chunk)
-        tasks.append(
-            fetch(items_url, {"countryCode": COUNTRY_CODE, "limit": chunk_size, "offset": current_offset})
-        )
+        tasks.append(fetch(items_url, {"countryCode": COUNTRY_CODE, "limit": chunk_size, "offset": current_offset}))
         current_offset += chunk_size
         remaining_limit -= chunk_size
-
     results = await asyncio.gather(*tasks)
-
     album_data = results[0]
     items_pages = results[1:]
-
     all_items = []
     for page in items_pages:
         page_items = page.get("items", page) if isinstance(page, dict) else page
         if isinstance(page_items, list):
             all_items.extend(page_items)
-
     album_data["items"] = all_items
-
-    return {
-        "version": API_VERSION,
-        "data": album_data,
-    }
+    return {"version": API_VERSION, "data": album_data}
 
 
 @app.get("/mix/")
-async def get_mix(
-    id: str = Query(..., description="Mix ID")
-):
-    """Fetch items from a Tidal mix by its ID."""
+async def get_mix(id: str = Query(..., description="Mix ID")):
     token, cred = await get_tidal_token_for_cred()
     url = "https://api.tidal.com/v1/pages/mix"
-    params = {
-        "mixId": id,
-        "countryCode": COUNTRY_CODE,
-        "deviceType": "BROWSER",
-    }
-
-    data, _, _ = await authed_get_json(
-        url,
-        params=params,
-        token=token,
-        cred=cred,
-    )
-
+    params = {"mixId": id, "countryCode": COUNTRY_CODE, "deviceType": "BROWSER"}
+    data, _, _ = await authed_get_json(url, params=params, token=token, cred=cred)
     header = {}
     items = []
-
-    rows = data.get("rows", [])
-    for row in rows:
-        modules = row.get("modules", [])
-        for module in modules:
+    for row in data.get("rows", []):
+        for module in row.get("modules", []):
             if module.get("type") == "MIX_HEADER":
                 header = module.get("mix", {})
             elif module.get("type") == "TRACK_LIST":
-                paged_list = module.get("pagedList", {})
-                items = paged_list.get("items", [])
-
+                items = module.get("pagedList", {}).get("items", [])
     return {
         "version": API_VERSION,
         "mix": header,
@@ -815,27 +683,18 @@ async def get_playlist(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
-    """Fetch playlist metadata plus items concurrently, using shared client and single token."""
-
     token, cred = await get_tidal_token_for_cred()
-
     playlist_url = f"https://api.tidal.com/v1/playlists/{id}"
     items_url = f"https://api.tidal.com/v1/playlists/{id}/items"
 
     async def fetch(url: str, params: Optional[dict] = None):
-        payload, _, _ = await authed_get_json(
-            url,
-            params=params,
-            token=token,
-            cred=cred,
-        )
+        payload, _, _ = await authed_get_json(url, params=params, token=token, cred=cred)
         return payload
 
     playlist_data, items_data = await asyncio.gather(
         fetch(playlist_url, {"countryCode": COUNTRY_CODE}),
         fetch(items_url, {"countryCode": COUNTRY_CODE, "limit": limit, "offset": offset}),
     )
-
     return {
         "version": API_VERSION,
         "playlist": playlist_data,
@@ -844,24 +703,14 @@ async def get_playlist(
 
 
 def _extract_uuid_from_tidal_url(href: str) -> Optional[str]:
-    """Extract and reconstruct a hyphenated UUID from a Tidal resource URL."""
     parts = href.split("/") if href else []
     return "-".join(parts[4:9]) if len(parts) >= 9 else None
 
 
 @app.get("/artist/similar/")
-async def get_similar_artists(
-    id: int = Query(..., description="Artist ID"),
-    cursor: Union[int, str, None] = None
-):
-    """Fetch artists similar to another by its ID using V2 API."""
+async def get_similar_artists(id: int = Query(...), cursor: Union[int, str, None] = None):
     url = f"https://openapi.tidal.com/v2/artists/{id}/relationships/similarArtists"
-    params = {
-        "page[cursor]": cursor,
-        "countryCode": COUNTRY_CODE,
-        "include": "similarArtists,similarArtists.profileArt"
-    }
-
+    params = {"page[cursor]": cursor, "countryCode": COUNTRY_CODE, "include": "similarArtists,similarArtists.profileArt"}
     payload, _, _ = await authed_get_json(url, params=params)
     included = payload.get("included", [])
     artists_map = {i["id"]: i for i in included if i["type"] == "artists"}
@@ -871,13 +720,11 @@ async def get_similar_artists(
         aid = entry["id"]
         inc = artists_map.get(aid, {})
         attr = inc.get("attributes", {})
-
         pic_id = None
         if art_data := inc.get("relationships", {}).get("profileArt", {}).get("data"):
             if artwork := artworks_map.get(art_data[0].get("id")):
                 if files := artwork.get("attributes", {}).get("files"):
                     pic_id = _extract_uuid_from_tidal_url(files[0].get("href"))
-
         return {
             **attr,
             "id": int(aid) if str(aid).isdigit() else aid,
@@ -885,26 +732,13 @@ async def get_similar_artists(
             "url": f"http://www.tidal.com/artist/{aid}",
             "relationType": "SIMILAR_ARTIST"
         }
-
-    return {
-        "version": API_VERSION,
-        "artists": [resolve_artist(e) for e in payload.get("data", [])]
-    }
+    return {"version": API_VERSION, "artists": [resolve_artist(e) for e in payload.get("data", [])]}
 
 
 @app.get("/album/similar/")
-async def get_similar_albums(
-    id: int = Query(..., description="Album ID"),
-    cursor: Union[int, str, None] = None
-):
-    """Fetch albums similar to another by its ID using V2 API."""
+async def get_similar_albums(id: int = Query(...), cursor: Union[int, str, None] = None):
     url = f"https://openapi.tidal.com/v2/albums/{id}/relationships/similarAlbums"
-    params = {
-        "page[cursor]": cursor,
-        "countryCode": COUNTRY_CODE,
-        "include": "similarAlbums,similarAlbums.coverArt,similarAlbums.artists"
-    }
-
+    params = {"page[cursor]": cursor, "countryCode": COUNTRY_CODE, "include": "similarAlbums,similarAlbums.coverArt,similarAlbums.artists"}
     payload, _, _ = await authed_get_json(url, params=params)
     included = payload.get("included", [])
     albums_map = {i["id"]: i for i in included if i["type"] == "albums"}
@@ -915,23 +749,20 @@ async def get_similar_albums(
         aid = entry["id"]
         inc = albums_map.get(aid, {})
         attr = inc.get("attributes", {})
-
         cover_id = None
         if art_data := inc.get("relationships", {}).get("coverArt", {}).get("data"):
             if artwork := artworks_map.get(art_data[0].get("id")):
                 if files := artwork.get("attributes", {}).get("files"):
                     cover_id = _extract_uuid_from_tidal_url(files[0].get("href"))
-
         artist_list = []
         if art_data := inc.get("relationships", {}).get("artists", {}).get("data"):
-             for a_entry in art_data:
-                 if a_obj := artists_map.get(a_entry["id"]):
-                     a_id = a_obj["id"]
-                     artist_list.append({
-                         "id": int(a_id) if str(a_id).isdigit() else a_id,
-                         "name": a_obj["attributes"]["name"]
-                     })
-
+            for a_entry in art_data:
+                if a_obj := artists_map.get(a_entry["id"]):
+                    a_id = a_obj["id"]
+                    artist_list.append({
+                        "id": int(a_id) if str(a_id).isdigit() else a_id,
+                        "name": a_obj["attributes"]["name"]
+                    })
         return {
             **attr,
             "id": int(aid) if str(aid).isdigit() else aid,
@@ -939,11 +770,7 @@ async def get_similar_albums(
             "artists": artist_list,
             "url": f"http://www.tidal.com/album/{aid}"
         }
-
-    return {
-        "version": API_VERSION,
-        "albums": [resolve_album(e) for e in payload.get("data", [])]
-    }
+    return {"version": API_VERSION, "albums": [resolve_album(e) for e in payload.get("data", [])]}
 
 
 @app.get("/artist/")
@@ -952,70 +779,33 @@ async def get_artist(
     f: Optional[int] = Query(default=None),
     skip_tracks: bool = Query(default=False),
 ):
-    """Artist detail or album+track aggregation.
-
-    - id: basic artist metadata + cover URLs
-    - f: fetch artist albums page and aggregate tracks across albums (capped concurrency)
-    - skip_tracks: if true, returns only albums without aggregating tracks (when using 'f')
-    """
-
     if id is None and f is None:
         raise HTTPException(status_code=400, detail="Provide id or f query param")
-
     token, cred = await get_tidal_token_for_cred()
-
     if id is not None:
         artist_url = f"https://api.tidal.com/v1/artists/{id}"
-        artist_data, token, cred = await authed_get_json(
-            artist_url,
-            params={"countryCode": COUNTRY_CODE},
-            token=token,
-            cred=cred,
-        )
-
+        artist_data, token, cred = await authed_get_json(artist_url, params={"countryCode": COUNTRY_CODE}, token=token, cred=cred)
         picture = artist_data.get("picture")
         fallback = artist_data.get("selectedAlbumCoverFallback")
-
         if not picture and fallback:
             artist_data["picture"] = fallback
             picture = fallback
-
         cover = None
         if picture:
             slug = picture.replace("-", "/")
-            cover = {
-                "id": artist_data.get("id"),
-                "name": artist_data.get("name"),
-                "750": f"https://resources.tidal.com/images/{slug}/750x750.jpg",
-            }
-
+            cover = {"id": artist_data.get("id"), "name": artist_data.get("name"), "750": f"https://resources.tidal.com/images/{slug}/750x750.jpg"}
         return {"version": API_VERSION, "artist": artist_data, "cover": cover}
-
-    # Fetch albums and singles/EPs directly in parallel
     albums_url = f"https://api.tidal.com/v1/artists/{f}/albums"
     common_params = {"countryCode": COUNTRY_CODE, "limit": 100}
-
     tasks = [
         authed_get_json(albums_url, params=common_params, token=token, cred=cred),
         authed_get_json(albums_url, params={**common_params, "filter": "EPSANDSINGLES"}, token=token, cred=cred),
     ]
-
     if skip_tracks:
-        tasks.append(
-            authed_get_json(
-                f"https://api.tidal.com/v1/artists/{f}/toptracks",
-                params={"countryCode": COUNTRY_CODE, "limit": 15},
-                token=token,
-                cred=cred
-            )
-        )
-
+        tasks.append(authed_get_json(f"https://api.tidal.com/v1/artists/{f}/toptracks", params={"countryCode": COUNTRY_CODE, "limit": 15}, token=token, cred=cred))
     results = await asyncio.gather(*tasks, return_exceptions=True)
-
     unique_releases = []
     seen_ids = set()
-
-    # Process albums (first 2 results)
     for res in results[:2]:
         if isinstance(res, tuple) and len(res) > 0:
             data = res[0]
@@ -1025,12 +815,8 @@ async def get_artist(
                     if isinstance(item, dict) and item.get("id") and item["id"] not in seen_ids:
                         unique_releases.append(item)
                         seen_ids.add(item["id"])
-        elif isinstance(res, Exception):
-            logger.warning("Error fetching artist releases: %s", res)
-
     album_ids: List[int] = [item["id"] for item in unique_releases]
     page_data = {"items": unique_releases}
-
     if skip_tracks:
         top_tracks = []
         if len(results) > 2:
@@ -1038,11 +824,7 @@ async def get_artist(
             if isinstance(res, tuple) and len(res) > 0:
                 data = res[0]
                 top_tracks = data.get("items", []) if isinstance(data, dict) else data
-            elif isinstance(res, Exception):
-                logger.warning("Error fetching top tracks: %s", res)
-
         return {"version": API_VERSION, "albums": page_data, "tracks": top_tracks}
-
     if not album_ids:
         return {"version": API_VERSION, "albums": page_data, "tracks": []}
 
@@ -1050,124 +832,67 @@ async def get_artist(
         async with _album_tracks_sem:
             album_data, _, _ = await authed_get_json(
                 "https://api.tidal.com/v1/pages/album",
-                params={
-                    "albumId": album_id,
-                    "countryCode": COUNTRY_CODE,
-                    "deviceType": "BROWSER",
-                },
+                params={"albumId": album_id, "countryCode": COUNTRY_CODE, "deviceType": "BROWSER"},
                 token=token,
                 cred=cred,
             )
-
             rows = album_data.get("rows", [])
             if len(rows) < 2:
                 return []
             modules = rows[1].get("modules", [])
             if not modules:
                 return []
-            paged_list = modules[0].get("pagedList", {})
-            items = paged_list.get("items", [])
-            tracks = [track.get("item", track) if isinstance(track, dict) else track for track in items]
-            return tracks
+            items = modules[0].get("pagedList", {}).get("items", [])
+            return [track.get("item", track) if isinstance(track, dict) else track for track in items]
 
-    results = await asyncio.gather(
-        *(fetch_album_tracks(album_id) for album_id in album_ids),
-        return_exceptions=True,
-    )
-
-    tracks: List[dict] = []
+    results = await asyncio.gather(*(fetch_album_tracks(aid) for aid in album_ids), return_exceptions=True)
+    tracks = []
     for res in results:
         if isinstance(res, Exception):
             continue
         tracks.extend(res)
-
     return {"version": API_VERSION, "albums": page_data, "tracks": tracks}
 
 
 @app.get("/cover/")
-async def get_cover(
-    id: Optional[int] = Query(default=None),
-    q: Optional[str] = Query(default=None),
-):
-    """Fetch album cover data for a track id or search query."""
-
+async def get_cover(id: Optional[int] = Query(default=None), q: Optional[str] = Query(default=None)):
     if id is None and q is None:
         raise HTTPException(status_code=400, detail="Provide id or q query param")
-
     token, cred = await get_tidal_token_for_cred()
 
     def build_cover_entry(cover_slug: str, name: Optional[str], track_id: Optional[int]):
         slug = cover_slug.replace("-", "/")
-        return {
-            "id": track_id,
-            "name": name,
-            "1280": f"https://resources.tidal.com/images/{slug}/1280x1280.jpg",
-            "640": f"https://resources.tidal.com/images/{slug}/640x640.jpg",
-            "80": f"https://resources.tidal.com/images/{slug}/80x80.jpg",
-        }
+        return {"id": track_id, "name": name, "1280": f"https://resources.tidal.com/images/{slug}/1280x1280.jpg", "640": f"https://resources.tidal.com/images/{slug}/640x640.jpg", "80": f"https://resources.tidal.com/images/{slug}/80x80.jpg"}
 
     if id is not None:
-        track_data, token, cred = await authed_get_json(
-            f"https://api.tidal.com/v1/tracks/{id}/",
-            params={"countryCode": COUNTRY_CODE},
-            token=token,
-            cred=cred,
-        )
-
+        track_data, token, cred = await authed_get_json(f"https://api.tidal.com/v1/tracks/{id}/", params={"countryCode": COUNTRY_CODE}, token=token, cred=cred)
         album = track_data.get("album") or {}
         cover_slug = album.get("cover")
         if not cover_slug:
             raise HTTPException(status_code=404, detail="Cover not found")
+        return {"version": API_VERSION, "covers": [build_cover_entry(cover_slug, album.get("title") or track_data.get("title"), album.get("id") or id)]}
 
-        entry = build_cover_entry(
-            cover_slug,
-            album.get("title") or track_data.get("title"),
-            album.get("id") or id,
-        )
-        return {"version": API_VERSION, "covers": [entry]}
-
-    search_data, token, cred = await authed_get_json(
-        "https://api.tidal.com/v1/search/tracks",
-        params={"countryCode": COUNTRY_CODE, "query": q, "limit": 10},
-        token=token,
-        cred=cred,
-    )
-
+    search_data, token, cred = await authed_get_json("https://api.tidal.com/v1/search/tracks", params={"countryCode": COUNTRY_CODE, "query": q, "limit": 10}, token=token, cred=cred)
     items = search_data.get("items", [])[:10]
     if not items:
         raise HTTPException(status_code=404, detail="Cover not found")
-
     covers = []
     for track in items:
         album = track.get("album") or {}
         cover_slug = album.get("cover")
-        if not cover_slug:
-            continue
-        covers.append(
-            build_cover_entry(
-                cover_slug,
-                track.get("title"),
-                track.get("id"),
-            )
-        )
-
+        if cover_slug:
+            covers.append(build_cover_entry(cover_slug, track.get("title"), track.get("id")))
     if not covers:
         raise HTTPException(status_code=404, detail="Cover not found")
-
     return {"version": API_VERSION, "covers": covers}
 
 
 @app.get("/lyrics/")
 async def get_lyrics(id: int):
     url = f"https://api.tidal.com/v1/tracks/{id}/lyrics"
-    data, token, cred = await authed_get_json(
-        url,
-        params={"countryCode": COUNTRY_CODE, "locale": "en_US", "deviceType": "BROWSER"},
-    )
-
+    data, token, cred = await authed_get_json(url, params={"countryCode": COUNTRY_CODE, "locale": "en_US", "deviceType": "BROWSER"})
     if not data:
         raise HTTPException(status_code=404, detail="Lyrics not found")
-
     return {"version": API_VERSION, "lyrics": data}
 
 
@@ -1179,73 +904,540 @@ async def get_top_videos(
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
-    """Fetch recommended videos from Tidal."""
     token, cred = await get_tidal_token_for_cred()
     url = "https://api.tidal.com/v1/pages/mymusic_recommended_videos"
-    params = {
-        "countryCode": countryCode,
-        "locale": locale,
-        "deviceType": deviceType,
-    }
-
-    data, token, cred = await authed_get_json(
-        url,
-        params=params,
-        token=token,
-        cred=cred,
-    )
-
+    params = {"countryCode": countryCode, "locale": locale, "deviceType": deviceType}
+    data, token, cred = await authed_get_json(url, params=params, token=token, cred=cred)
     rows = data.get("rows", [])
     all_videos = []
     for row in rows:
-        modules = row.get("modules", [])
-        for module in modules:
+        for module in row.get("modules", []):
             module_type = module.get("type")
             if module_type in ("VIDEO_PLAYLIST", "VIDEO_ROW", "PAGED_LIST"):
-                paged_list = module.get("pagedList", {})
-                if paged_list:
-                    items = paged_list.get("items", [])
-                    for item in items:
-                        video = item.get("item", item) if isinstance(item, dict) else item
-                        all_videos.append(video)
+                items = module.get("pagedList", {}).get("items", [])
+                for item in items:
+                    video = item.get("item", item) if isinstance(item, dict) else item
+                    all_videos.append(video)
             elif module_type == "VIDEO" or (module_type and "video" in module_type.lower()):
                 item = module.get("item", module)
                 if isinstance(item, dict):
                     all_videos.append(item)
+    return {"version": API_VERSION, "videos": all_videos[offset:offset + limit], "total": len(all_videos)}
 
-    paginated = all_videos[offset:offset + limit]
-
-    response = {
-        "version": API_VERSION,
-        "videos": paginated,
-        "total": len(all_videos),
-    }
-    return response
 
 @app.get("/video/")
 async def get_video(
-    id: int = Query(..., description="Video ID"),
-    quality: str = Query(default="HIGH", description="Video quality (HIGH, MEDIUM, LOW)"),
-    mode: str = Query(default="STREAM", description="Playback mode (STREAM, OFFLINE)"),
-    presentation: str = Query(default="FULL", description="Asset presentation (FULL, PREVIEW)"),
+    id: int = Query(...),
+    quality: str = Query(default="HIGH"),
+    mode: str = Query(default="STREAM"),
+    presentation: str = Query(default="FULL"),
 ):
-    """Fetch video playback info from Tidal."""
     token, cred = await get_tidal_token_for_cred()
     url = f"https://api.tidal.com/v1/videos/{id}/playbackinfo"
-    params = {
-        "videoquality": quality,
-        "playbackmode": mode,
-        "assetpresentation": presentation,
-    }
+    params = {"videoquality": quality, "playbackmode": mode, "assetpresentation": presentation}
+    data, token, cred = await authed_get_json(url, params=params, token=token, cred=cred)
+    return {"version": API_VERSION, "video": data}
 
-    data, token, cred = await authed_get_json(
-        url,
-        params=params,
-        token=token,
-        cred=cred,
+
+# ======================== DOWNLOAD ENDPOINTS ========================
+
+SUPPORTED_QUALITIES = ["LOSSLESS", "HI_RES_LOSSLESS", "HIGH", "LOW"]
+
+
+async def get_manifest_info(track_id: int, quality: str = "HI_RES_LOSSLESS") -> dict:
+    """Returns manifest information without downloading"""
+    track_url = f"https://api.tidal.com/v1/tracks/{track_id}/playbackinfo"
+    params = {"audioquality": quality, "playbackmode": "STREAM", "assetpresentation": "FULL"}
+    
+    result = await make_request(track_url, params=params)
+    playback_data = result["data"]
+    
+    info_result = await make_request(f"https://api.tidal.com/v1/tracks/{track_id}/", params={"countryCode": COUNTRY_CODE})
+    track_info = info_result["data"]
+    track_title = track_info.get("title", f"track_{track_id}")
+    artist_name = track_info.get("artist", {}).get("name", "unknown")
+    
+    manifest_b64 = playback_data.get("manifest")
+    if not manifest_b64:
+        raise HTTPException(400, f"No manifest for track {track_id} with quality {quality}")
+    
+    try:
+        manifest_decoded = base64.b64decode(manifest_b64).decode()
+    except Exception as e:
+        raise HTTPException(400, f"Failed to decode manifest: {str(e)}")
+    
+    manifest_decoded = manifest_decoded.strip()
+    
+    if manifest_decoded.startswith('{'):
+        try:
+            manifest_json = json.loads(manifest_decoded)
+            urls = manifest_json.get("urls", [])
+            codecs = manifest_json.get("codecs", "unknown")
+            mime_type = manifest_json.get("mimeType", "audio/mp4")
+            
+            if "flac" in codecs.lower() or "flac" in mime_type:
+                ext = "flac"
+            else:
+                ext = "m4a"
+            
+            return {
+                "track_id": track_id,
+                "title": track_title,
+                "artist": artist_name,
+                "quality": quality,
+                "codecs": codecs,
+                "mime_type": mime_type,
+                "type": "direct",
+                "extension": ext,
+                "url": urls[0] if urls else None
+            }
+        except json.JSONDecodeError as e:
+            raise HTTPException(400, f"Invalid JSON manifest: {str(e)}")
+    
+    elif manifest_decoded.startswith('<'):
+        try:
+            root = ET.fromstring(manifest_decoded)
+            seg_template = root.find(".//mpd:SegmentTemplate", DASH_NS)
+            if seg_template is None:
+                seg_template = root.find(".//SegmentTemplate")
+            
+            if seg_template is None:
+                raise HTTPException(400, "No SegmentTemplate found in MPD")
+            
+            init_url = seg_template.get("initialization")
+            media_template = seg_template.get("media")
+            
+            s_element = seg_template.find(".//mpd:S", DASH_NS)
+            if s_element is None:
+                s_element = seg_template.find(".//S")
+            
+            if s_element is None:
+                raise HTTPException(400, "No SegmentTimeline found in MPD")
+            
+            r = int(s_element.get("r", "0"))
+            total_segments = r + 3
+            
+            segment_urls = []
+            for i in range(total_segments):
+                if i == 0:
+                    segment_urls.append({"segment": i, "url": init_url})
+                else:
+                    segment_urls.append({"segment": i, "url": media_template.replace("$Number$", str(i))})
+            
+            return {
+                "track_id": track_id,
+                "title": track_title,
+                "artist": artist_name,
+                "quality": quality,
+                "codecs": "flac",
+                "type": "dash",
+                "extension": "flac",
+                "segment_range": f"0-{total_segments - 1}",
+                "total_segments": total_segments,
+                "segments": segment_urls
+            }
+        except ET.ParseError as e:
+            raise HTTPException(400, f"Invalid XML manifest: {str(e)}")
+    
+    else:
+        raise HTTPException(400, f"Unknown manifest format: {manifest_decoded[:100]}")
+
+
+async def download_single_track(track_id: int, quality: str = "HI_RES_LOSSLESS") -> tuple[bytes, str, str]:
+    """Download a track and return (bytes, filename, mime_type)"""
+    info = await get_manifest_info(track_id, quality)
+    
+    ext = info.get("extension", "flac" if quality in ["LOSSLESS", "HI_RES_LOSSLESS"] else "m4a")
+    mime_type = "audio/flac" if ext == "flac" else "audio/mp4"
+    safe_filename = f"{info['artist']} - {info['title']}.{ext}".replace("/", "_").replace("\\", "_").replace(":", "_").replace("?", "").replace("*", "").replace('"', "'")
+    
+    if info["type"] == "direct":
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(info["url"])
+            if resp.status_code != 200:
+                raise HTTPException(502, f"Failed to download track {track_id}")
+            content = resp.content
+            if ext == "flac" or b"fLaC" in content[:4]:
+                return content, safe_filename, mime_type
+            if b"ftyp" in content[:8]:
+                temp_dir = tempfile.mkdtemp()
+                try:
+                    temp_input = os.path.join(temp_dir, "input.mp4")
+                    temp_output = os.path.join(temp_dir, f"output.{ext}")
+                    with open(temp_input, "wb") as f:
+                        f.write(content)
+                    subprocess.run(["ffmpeg", "-i", temp_input, "-c:a", "flac", temp_output, "-y"], check=True, capture_output=True)
+                    with open(temp_output, "rb") as f:
+                        content = f.read()
+                    return content, safe_filename, "audio/flac"
+                finally:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            return content, safe_filename, mime_type
+    
+    else:  # DASH
+        temp_dir = tempfile.mkdtemp()
+        seg_files = []
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                for seg in info["segments"]:
+                    resp = await client.get(seg["url"])
+                    if resp.status_code != 200:
+                        raise HTTPException(502, f"Failed to download segment {seg['segment']}")
+                    seg_path = os.path.join(temp_dir, f"seg_{seg['segment']}.mp4")
+                    with open(seg_path, "wb") as f:
+                        f.write(resp.content)
+                    seg_files.append(seg_path)
+            
+            combined_path = os.path.join(temp_dir, "full.mp4")
+            with open(combined_path, "wb") as out:
+                for fpath in seg_files:
+                    with open(fpath, "rb") as inf:
+                        out.write(inf.read())
+            
+            output_path = os.path.join(temp_dir, f"output.{ext}")
+            subprocess.run(["ffmpeg", "-i", combined_path, "-c:a", "flac", output_path, "-y"], check=True, capture_output=True)
+            
+            with open(output_path, "rb") as f:
+                data = f.read()
+            
+            return data, safe_filename, "audio/flac"
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def extract_track_ids_from_playlist(playlist_data: dict) -> List[int]:
+    """Extract track IDs from playlist response, regardless of structure"""
+    track_ids = []
+    
+    items = playlist_data.get("items", [])
+    
+    if not items and "playlist" in playlist_data:
+        items = playlist_data["playlist"].get("items", [])
+    
+    if not items and "data" in playlist_data:
+        data = playlist_data["data"]
+        if isinstance(data, dict):
+            items = data.get("items", [])
+            if not items:
+                items = data.get("playlist", {}).get("items", [])
+    
+    for item in items:
+        if isinstance(item, dict):
+            track = item.get("item", item)
+            if track.get("type") == "track" and track.get("id"):
+                track_ids.append(track["id"])
+            elif track.get("id") and "title" in track:
+                track_ids.append(track["id"])
+    
+    return track_ids
+
+
+# DOWNLOAD ENDPOINTS 
+@app.get("/download/")
+async def download_track(id: int, quality: str = Query(default="HI_RES_LOSSLESS", pattern=f"^({'|'.join(SUPPORTED_QUALITIES)})$")):
+    data, filename, mime_type = await download_single_track(id, quality)
+    return Response(
+        content=data,
+        media_type=mime_type,
+        headers={"Content-Disposition": f"attachment; filename=\"{filename}\""}
     )
 
-    return {"version": API_VERSION, "video": data}
+
+@app.get("/download/album/")
+async def download_album(id: int, quality: str = Query(default="HI_RES_LOSSLESS", pattern=f"^({'|'.join(SUPPORTED_QUALITIES)})$")):
+    token, cred = await get_tidal_token_for_cred()
+    album_url = f"https://api.tidal.com/v1/albums/{id}"
+    items_url = f"https://api.tidal.com/v1/albums/{id}/items"
+    
+    album_data, _, _ = await authed_get_json(album_url, params={"countryCode": COUNTRY_CODE}, token=token, cred=cred)
+    items_data, _, _ = await authed_get_json(items_url, params={"countryCode": COUNTRY_CODE, "limit": 100}, token=token, cred=cred)
+    
+    tracks = []
+    for item in items_data.get("items", []):
+        if isinstance(item, dict):
+            track = item.get("item", item)
+            track_id = track.get("id")
+            if track_id:
+                tracks.append(track_id)
+    
+    if not tracks:
+        raise HTTPException(404, f"No tracks found in album {id}")
+    
+    album_title = album_data.get("title", f"album_{id}")
+    artist_name = album_data.get("artist", {}).get("name", "unknown")
+    safe_zip_name = f"{artist_name} - {album_title}".replace("/", "_").replace("\\", "_").replace(":", "_").replace("?", "").replace("*", "").replace('"', "'")
+    
+    logger.info(f"Downloading {len(tracks)} tracks from album {id}")
+    
+    async def download_with_index(idx_tid):
+        idx, tid = idx_tid
+        try:
+            data, filename, _ = await download_single_track(tid, quality)
+            return (idx, data, filename, None)
+        except Exception as e:
+            return (idx, None, None, str(e))
+    
+    results = await asyncio.gather(*[download_with_index((i, tid)) for i, tid in enumerate(tracks)])
+    
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for idx, data, filename, error in results:
+            if data:
+                zip_file.writestr(filename, data)
+            else:
+                logger.error(f"Failed to download track {idx}: {error}")
+    
+    zip_buffer.seek(0)
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=\"{safe_zip_name}.zip\""}
+    )
+
+
+@app.get("/download/playlist/")
+async def download_playlist(
+    id: str, 
+    quality: str = Query(default="HI_RES_LOSSLESS", pattern=f"^({'|'.join(SUPPORTED_QUALITIES)})$"), 
+    limit: int = Query(default=500, ge=1, le=500)
+):
+    token, cred = await get_tidal_token_for_cred()
+    
+    playlist_url = f"https://api.tidal.com/v1/playlists/{id}"
+    items_url = f"https://api.tidal.com/v1/playlists/{id}/items"
+    
+    playlist_data, _, _ = await authed_get_json(
+        playlist_url, 
+        params={"countryCode": COUNTRY_CODE}, 
+        token=token, 
+        cred=cred
+    )
+    
+    all_tracks = []
+    offset = 0
+    chunk_size = 100
+    
+    while True:
+        items_data, _, _ = await authed_get_json(
+            items_url, 
+            params={"countryCode": COUNTRY_CODE, "limit": chunk_size, "offset": offset}, 
+            token=token, 
+            cred=cred
+        )
+        
+        items = items_data.get("items", [])
+        if not items:
+            break
+        
+        for item in items:
+            if isinstance(item, dict):
+                track = item.get("item", item)
+                if track.get("type") == "track" and track.get("id"):
+                    all_tracks.append(track["id"])
+                elif track.get("id") and "title" in track:
+                    all_tracks.append(track["id"])
+        
+        offset += len(items)
+        if offset >= limit or len(items) < chunk_size:
+            break
+    
+    if not all_tracks:
+        raise HTTPException(404, f"No tracks found in playlist {id}")
+    
+    playlist_title = playlist_data.get("title", f"playlist_{id}")
+    safe_zip_name = playlist_title.replace("/", "_").replace("\\", "_").replace(":", "_").replace("?", "").replace("*", "").replace('"', "'")
+    
+    logger.info(f"Downloading {len(all_tracks)} tracks from playlist {id}")
+    
+    async def download_with_index(idx_tid):
+        idx, tid = idx_tid
+        try:
+            data, filename, _ = await download_single_track(tid, quality)
+            return (idx, data, filename, None)
+        except Exception as e:
+            return (idx, None, None, str(e))
+    
+    results = await asyncio.gather(*[download_with_index((i, tid)) for i, tid in enumerate(all_tracks)])
+    
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for idx, data, filename, error in results:
+            if data:
+                zip_file.writestr(filename, data)
+            else:
+                logger.error(f"Failed to download track {idx}: {error}")
+    
+    zip_buffer.seek(0)
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=\"{safe_zip_name}.zip\""}
+    )
+
+
+@app.get("/download/multi/")
+async def download_multiple(ids: str = Query(...), quality: str = Query(default="HI_RES_LOSSLESS", pattern=f"^({'|'.join(SUPPORTED_QUALITIES)})$")):
+    if "+" in ids:
+        track_ids = [int(x.strip()) for x in ids.split("+") if x.strip().isdigit()]
+    else:
+        track_ids = [int(x.strip()) for x in ids.split(",") if x.strip().isdigit()]
+    
+    if not track_ids:
+        raise HTTPException(400, "Provide at least one valid track ID")
+    
+    logger.info(f"Downloading {len(track_ids)} selected tracks")
+    
+    async def download_with_index(idx_tid):
+        idx, tid = idx_tid
+        try:
+            data, filename, _ = await download_single_track(tid, quality)
+            return (idx, data, filename, None)
+        except Exception as e:
+            return (idx, None, None, str(e))
+    
+    results = await asyncio.gather(*[download_with_index((i, tid)) for i, tid in enumerate(track_ids)])
+    
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for idx, data, filename, error in results:
+            if data:
+                zip_file.writestr(filename, data)
+            else:
+                logger.error(f"Failed to download track {track_ids[idx]}: {error}")
+    
+    zip_buffer.seek(0)
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=\"tracks_{len(track_ids)}.zip\""}
+    )
+
+
+# LINK ENDPOINTS (returns JSON with URLs)
+@app.get("/download/link/")
+async def download_track_link(id: int, quality: str = Query(default="HI_RES_LOSSLESS", pattern=f"^({'|'.join(SUPPORTED_QUALITIES)})$")):
+    info = await get_manifest_info(id, quality)
+    return {"version": API_VERSION, "data": info}
+
+
+@app.get("/download/link/album/")
+async def download_album_link(id: int, quality: str = Query(default="HI_RES_LOSSLESS", pattern=f"^({'|'.join(SUPPORTED_QUALITIES)})$")):
+    token, cred = await get_tidal_token_for_cred()
+    album_url = f"https://api.tidal.com/v1/albums/{id}"
+    items_url = f"https://api.tidal.com/v1/albums/{id}/items"
+    
+    album_data, _, _ = await authed_get_json(album_url, params={"countryCode": COUNTRY_CODE}, token=token, cred=cred)
+    items_data, _, _ = await authed_get_json(items_url, params={"countryCode": COUNTRY_CODE, "limit": 100}, token=token, cred=cred)
+    
+    tracks = []
+    for item in items_data.get("items", []):
+        if isinstance(item, dict):
+            track = item.get("item", item)
+            track_id = track.get("id")
+            if track_id:
+                tracks.append(track_id)
+    
+    album_title = album_data.get("title", f"album_{id}")
+    artist_name = album_data.get("artist", {}).get("name", "unknown")
+    
+    all_tracks_info = []
+    for track_id in tracks:
+        try:
+            info = await get_manifest_info(track_id, quality)
+            all_tracks_info.append(info)
+        except Exception as e:
+            all_tracks_info.append({"track_id": track_id, "error": str(e)})
+    
+    return {
+        "version": API_VERSION,
+        "album": {"id": id, "title": album_title, "artist": artist_name},
+        "tracks": all_tracks_info
+    }
+
+
+@app.get("/download/link/playlist/")
+async def download_playlist_link(
+    id: str, 
+    quality: str = Query(default="HI_RES_LOSSLESS", pattern=f"^({'|'.join(SUPPORTED_QUALITIES)})$"), 
+    limit: int = Query(default=500, ge=1, le=500)
+):
+    token, cred = await get_tidal_token_for_cred()
+    
+    playlist_url = f"https://api.tidal.com/v1/playlists/{id}"
+    items_url = f"https://api.tidal.com/v1/playlists/{id}/items"
+    
+    playlist_data, _, _ = await authed_get_json(
+        playlist_url, 
+        params={"countryCode": COUNTRY_CODE}, 
+        token=token, 
+        cred=cred
+    )
+    
+    all_tracks = []
+    offset = 0
+    chunk_size = 100
+    
+    while True:
+        items_data, _, _ = await authed_get_json(
+            items_url, 
+            params={"countryCode": COUNTRY_CODE, "limit": chunk_size, "offset": offset}, 
+            token=token, 
+            cred=cred
+        )
+        
+        items = items_data.get("items", [])
+        if not items:
+            break
+        
+        for item in items:
+            if isinstance(item, dict):
+                track = item.get("item", item)
+                if track.get("type") == "track" and track.get("id"):
+                    all_tracks.append(track["id"])
+                elif track.get("id") and "title" in track:
+                    all_tracks.append(track["id"])
+        
+        offset += len(items)
+        if offset >= limit or len(items) < chunk_size:
+            break
+    
+    playlist_title = playlist_data.get("title", f"playlist_{id}")
+    
+    all_tracks_info = []
+    for track_id in all_tracks:
+        try:
+            info = await get_manifest_info(track_id, quality)
+            all_tracks_info.append(info)
+        except Exception as e:
+            all_tracks_info.append({"track_id": track_id, "error": str(e)})
+    
+    return {
+        "version": API_VERSION,
+        "playlist": {"id": id, "title": playlist_title},
+        "total_tracks": len(all_tracks),
+        "tracks": all_tracks_info
+    }
+
+
+@app.get("/download/link/multi/")
+async def download_multiple_link(ids: str = Query(...), quality: str = Query(default="HI_RES_LOSSLESS", pattern=f"^({'|'.join(SUPPORTED_QUALITIES)})$")):
+    if "+" in ids:
+        track_ids = [int(x.strip()) for x in ids.split("+") if x.strip().isdigit()]
+    else:
+        track_ids = [int(x.strip()) for x in ids.split(",") if x.strip().isdigit()]
+    
+    if not track_ids:
+        raise HTTPException(400, "Provide at least one valid track ID")
+    
+    all_tracks_info = []
+    for track_id in track_ids:
+        try:
+            info = await get_manifest_info(track_id, quality)
+            all_tracks_info.append(info)
+        except Exception as e:
+            all_tracks_info.append({"track_id": track_id, "error": str(e)})
+    
+    return {"version": API_VERSION, "tracks": all_tracks_info}
 
 
 if __name__ == "__main__":

@@ -1602,3 +1602,72 @@ https://im-fa.manifest.tidal.com/1/manifests/CAESCDQ4MjA0MTA2GAEiFjYwNWlPMWk4ME5
 #EXT-X-STREAM-INF:BANDWIDTH=5447000,AVERAGE-BANDWIDTH=5447000,CODECS="mp4a.40.2,avc1.640028",RESOLUTION=1920x1080
 https://im-fa.manifest.tidal.com/1/manifests/CAESCDQ4MjA0MTA2GAEiFldFanZRQnRnTGFfWGNzRzU0Z2trdkEoATACUAE.m3u8?token=1772574889~NGYzNmJjNjU4ZjQwNjZkODVhNThhZWI3Y2MwNTU3NzEzMWUzMWI0MQ==
 ```
+
+## 📥 Download Endpoints Explained (THE ADDTION TO HIFI API MORE COMING SOON)
+
+### `/download/` - Single Track
+**Purpose:** Downloads one track as an audio file (FLAC or M4A)  
+**Parameters:** `id` (track ID), `quality` (audio quality)  
+**Returns:** Audio file attachment
+
+### `/download/link/` - Single Track Link
+**Purpose:** Returns JSON metadata and download URL without downloading the file  
+**Parameters:** `id` (track ID), `quality` (audio quality)  
+**Returns:** JSON with track info, codec, extension, and direct URL
+
+---
+
+### `/download/album/` - Full Album
+**Purpose:** Downloads an entire album as a ZIP archive containing all tracks  
+**Parameters:** `id` (album ID), `quality` (audio quality)  
+**Returns:** ZIP file named "Artist - Album.zip"
+
+### `/download/link/album/` - Album Links
+**Purpose:** Returns JSON with album info and download URLs for every track  
+**Parameters:** `id` (album ID), `quality` (audio quality)  
+**Returns:** JSON containing album metadata + array of track manifests
+
+---
+
+### `/download/playlist/` - Playlist Download
+**Purpose:** Downloads a playlist as a ZIP archive  
+**Parameters:** `id` (playlist UUID), `quality`, `limit` (max tracks, default 500)  
+**Returns:** ZIP file named after the playlist
+
+### `/download/link/playlist/` - Playlist Links
+**Purpose:** Returns JSON with playlist info and download URLs for all tracks  
+**Parameters:** `id` (playlist UUID), `quality`, `limit`  
+**Returns:** JSON with playlist metadata + total tracks + track manifests
+
+---
+
+### `/download/multi/` - Multiple Tracks
+**Purpose:** Downloads several specific tracks as a single ZIP archive  
+**Parameters:** `ids` (comma or plus separated track IDs), `quality`  
+**Returns:** ZIP file named "tracks_N.zip"
+
+### `/download/link/multi/` - Multiple Track Links
+**Purpose:** Returns JSON with download URLs for multiple specific tracks  
+**Parameters:** `ids` (comma or plus separated), `quality`  
+**Returns:** JSON array of track manifests
+
+---
+
+## Key Distinction
+
+| Endpoint | What You Get |
+|----------|--------------|
+| `/download/*` | Actual audio file or ZIP archive |
+| `/download/link/*` | JSON with metadata and URLs (no file download) |
+
+## Quality Options
+- `LOW` - AAC low bitrate
+- `HIGH` - AAC high bitrate  
+- `LOSSLESS` - CD quality FLAC (16-bit)
+- `HI_RES_LOSSLESS` - Hi-Res FLAC (24-bit)
+
+## ID Formats
+- **Track IDs:** Integers (e.g., `123456789`)
+- **Album IDs:** Integers
+- **Playlist IDs:** UUID strings (e.g., `abc123def-456...`)
+- **Multiple IDs:** Use commas `123,456,789` or plus signs `123+456+789`
