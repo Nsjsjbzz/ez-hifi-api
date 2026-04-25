@@ -4,6 +4,8 @@
 
 <p align="center">Running on BiniLossless on <a href="https://tidal.qqdl.site/">qqdl.site</a>.</p>
 
+<a href="https://github.com/Nsjsjbzz/ez-hifi-api#-download-endpoints-explained-the-addtion-to-hifi-api-more-coming-soon">New DOWNLOAD enpoints here!!!</a>.</p>
+
 `hifi-api` is forked from the original project [sachinsenal0x64/hifi](https://github.com/sachinsenal0x64/hifi).
 
 > [!IMPORTANT]
