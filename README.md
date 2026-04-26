@@ -252,20 +252,23 @@ curl "http://localhost:8000/trackv2/check/?id=495566820"
 
 ---
 
-🔍 Parameter Details
+🔍 Parameter Details  
 
-Common Parameters (All Endpoints)
+Parameter Type Valid Values Description:  
 
-Parameter Type Valid Values Description
 **id int** -> Any valid Tidal ID Track ID, Album ID, Artist ID, Video ID  
+
 **quality string** -> HI_RES_LOSSLESS, LOSSLESS, HIGH, LOW Audio quality (case-sensitive)  
+
 **limit int** -> 1-500 Maximum number of items to return/download  
+
 **offset int** -> 0+ Pagination offset (for non-download endpoints)  
 
-V2 Specific Parameters
+V2 Specific Parameters  
 
-Parameter Type Valid Values Default Description
+Parameter Type Valid Values Default Description  
 **show_all_qualities** -> boolean false(default), returns all available qualities with their URLs  
+
 **ids** -> (for multi) string Comma or plus separated Required Example: 123,456,789 or 123+456+789  
 
 Playlist ID Format:  
@@ -283,7 +286,7 @@ Type Format Example
 
 ---
 
-🔄 V1 vs V2 Comparison
+🔄 V1 vs V2 Comparison  
 
 Feature V1 (/download/*) V2 (/downloadv2/*)  
 Token File token.json token_hifi.json  
@@ -296,7 +299,7 @@ Best For Exact quality control Best available quality
 
 ---
 
-💡 Quick Reference Examples
+💡 Quick Reference Examples  
 
 ```bash
 # V1 - Exact quality control
