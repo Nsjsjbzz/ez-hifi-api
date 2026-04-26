@@ -257,42 +257,42 @@ curl "http://localhost:8000/trackv2/check/?id=495566820"
 Common Parameters (All Endpoints)
 
 Parameter Type Valid Values Description
-**id int** -> Any valid Tidal ID Track ID, Album ID, Artist ID, Video ID
-**quality string** -> HI_RES_LOSSLESS, LOSSLESS, HIGH, LOW Audio quality (case-sensitive)
-**limit int** -> 1-500 Maximum number of items to return/download
-**offset int** -> 0+ Pagination offset (for non-download endpoints)
+**id int** -> Any valid Tidal ID Track ID, Album ID, Artist ID, Video ID  
+**quality string** -> HI_RES_LOSSLESS, LOSSLESS, HIGH, LOW Audio quality (case-sensitive)  
+**limit int** -> 1-500 Maximum number of items to return/download  
+**offset int** -> 0+ Pagination offset (for non-download endpoints)  
 
 V2 Specific Parameters
 
 Parameter Type Valid Values Default Description
-**show_all_qualities** -> boolean false(default), returns all available qualities with their URLs
-**ids** -> (for multi) string Comma or plus separated Required Example: 123,456,789 or 123+456+789
+**show_all_qualities** -> boolean false(default), returns all available qualities with their URLs  
+**ids** -> (for multi) string Comma or plus separated Required Example: 123,456,789 or 123+456+789  
 
-Playlist ID Format:
+Playlist ID Format:  
 
-V1 & V2 UUID
-```abc12345-6789-def0-1234-56789abcdef0```
+V1 & V2 UUID  
+```abc12345-6789-def0-1234-56789abcdef0```  
 
-Album/Track/Artist ID Format:
+Album/Track/Artist ID Format:  
 
-Type Format Example
-**Track Integer** 495566820
-**Album Integer** 123456789
-**Artist Integer** 987654321
-**Video Integer** 111222333
+Type Format Example  
+**Track Integer** 495566820  
+**Album Integer** 123456789  
+**Artist Integer** 987654321  
+**Video Integer** 111222333  
 
 ---
 
 🔄 V1 vs V2 Comparison
 
-Feature V1 (/download/*) V2 (/downloadv2/*)
-Token File token.json token_hifi.json
-API Used playbackinfo + manifest streamurl direct
-Quality Control Exact requested quality May upgrade to higher quality
-Metadata Always included Included in /link/ endpoints
-DASH Support ✅ Yes (segments) ❌ No (direct URL only)
-Speed Slower (manifest parsing) Faster (direct URL)
-Best For Exact quality control Best available quality
+Feature V1 (/download/*) V2 (/downloadv2/*)  
+Token File token.json token_hifi.json  
+API Used playbackinfo + manifest streamurl direct  
+Quality Control Exact requested quality May upgrade to higher quality  
+Metadata Always included Included in /link/ endpoints  
+DASH Support ✅ Yes (segments) ❌ No (direct URL only)  
+Speed Slower (manifest parsing) Faster (direct URL)  
+Best For Exact quality control Best available quality  
 
 ---
 
