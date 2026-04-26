@@ -1,6 +1,6 @@
 # ez-hifi-api
 
-<p align="center">Fork of<a href="https://github.com/binimum/hifi-api"> hifi-api</a>.</p>
+<p align="center">Fork of <a href="https://github.com/binimum/hifi-api">hifi-api</a>.</p>
 
 `hifi-api` is forked from the original project [sachinsenal0x64/hifi](https://github.com/sachinsenal0x64/hifi).
 
@@ -49,59 +49,111 @@ Tidal appears to region lock by account, not by countryCode. Nevertheless, count
 Usually, tracks that support Atmos will have `DOLBY_ATMOS` in `mediaMetadata.tags`. To request Dolby Atmos tracks, use the new `trackManifests` endpoint - see its spec for more info on Atmos.
 
 ## API Schema
-🎵 HiFi-RestAPI - Download & Track Endpoints Documentation
+🎵 HiFi-RestAPI - Complete API Documentation
 
-📊 Quality Values
+<p align="center">
+  <strong>A Tidal Music Proxy with Dual Token Support (V1 + V2)</strong><br>
+  <code>token.json</code> for V1 | <code>token_hifi.json</code> for V2
+</p>
 
-Quality V1 Parameter V2 Parameter Description
-Best Available HI_RES_LOSSLESS HI_RES_LOSSLESS 24-bit FLAC (MQA if available)
-CD Quality LOSSLESS LOSSLESS 16-bit FLAC
-High HIGH HIGH 320kbps AAC
-Low LOW LOW 96kbps AAC
+---
+
+📊 Quality Values (Both V1 & V2)
+
+Quality Parameter Value Bitrate/Format Description
+🔥 Best Available HI_RES_LOSSLESS 24-bit FLAC MQA if available, highest quality
+💿 CD Quality LOSSLESS 16-bit FLAC Standard lossless
+📻 High HIGH 320kbps AAC High bitrate AAC
+📻 Low LOW 96kbps AAC Low bitrate AAC
 
 ---
 
 📥 V1 DOWNLOAD ENDPOINTS (token.json)
 
-/download/ - Single Track Download
+🔹 Single Track
 
-```http
-GET /download/?id={track_id}&quality={quality}
-```
+Endpoint Method Parameters Default Response
+/download/ GET id (int), quality (string) quality=HI_RES_LOSSLESS Audio file (FLAC/M4A)
+/download/link/ GET id (int), quality (string) quality=HI_RES_LOSSLESS JSON with download URL + metadata
 
-Parameter Type Default Description
-id int Required Tidal track ID
-quality string HI_RES_LOSSLESS Audio quality (HI_RES_LOSSLESS, LOSSLESS, HIGH, LOW)
+🔹 Bulk Downloads
 
-How it works:
+Endpoint Method Parameters Default Response
+/download/album/ GET id (int), quality (string) quality=HI_RES_LOSSLESS ZIP file (album_{id}.zip)
+/download/playlist/ GET id (string), quality (string), limit (int) quality=HI_RES_LOSSLESS, limit=500 ZIP file (playlist_{id}.zip)
+/download/multi/ GET ids (string), quality (string) quality=HI_RES_LOSSLESS ZIP file (tracks_{count}.zip)
 
-1. Calls tidal api
-2. Receives base64 encoded manifest
-3. Decodes manifest (JSON or XML/DASH)
-4. Extracts audio URL for requested quality
-5. Downloads and converts to FLAC if needed
-
-Response: Audio file (FLAC or M4A) with Content-Disposition header
-
-Example:
-
-```bash
-curl -O "http://localhost:8000/download/?id=495566820&quality=LOSSLESS"
-```
+Note for /download/multi/: Accepts comma-separated (123,456,789) or plus-separated (123+456+789) track IDs.
 
 ---
 
-/download/link/ - Get Download Link (JSON)
+📥 V2 DOWNLOAD ENDPOINTS (token_hifi.json)
 
-```http
-GET /download/link/?id={track_id}&quality={quality}
-```
+ℹ️ Note: V2 uses Tidal's direct streamurl API. It may return a higher quality than requested if HI_RES_LOSSLESS is available.
 
-Parameter Type Default Description
-id int Required Tidal track ID
-quality string HI_RES_LOSSLESS Audio quality
+🔹 Single Track
 
-Response:
+Endpoint Method Parameters Default Response
+/trackv2/ GET id (int), quality (string), show_all_qualities (bool) quality=HI_RES_LOSSLESS, show_all_qualities=false JSON (single or all qualities)
+/trackv2/quality/ GET id (int), quality (string) quality=HI_RES_LOSSLESS JSON with specific quality
+/downloadv2/ GET id (int), quality (string) quality=HI_RES_LOSSLESS Audio file (FLAC/M4A)
+/downloadv2/link/ GET id (int), quality (string) quality=HI_RES_LOSSLESS JSON with download URL + metadata
+
+🔹 Bulk Downloads
+
+Endpoint Method Parameters Default Response
+/downloadv2/album/ GET id (int), quality (string) quality=HI_RES_LOSSLESS ZIP file (album_{id}_{quality}.zip)
+/downloadv2/playlist/ GET id (string), quality (string), limit (int) quality=HI_RES_LOSSLESS, limit=500 ZIP file (playlist_{id}_{quality}.zip)
+/downloadv2/multi/ GET ids (string), quality (string) quality=HI_RES_LOSSLESS ZIP file (tracks_{count}_{quality}.zip)
+
+🔹 JSON Link Endpoints (Bulk)
+
+Endpoint Method Parameters Default Response
+/downloadv2/link/album/ GET id (int), quality (string) quality=HI_RES_LOSSLESS JSON with all album track URLs
+/downloadv2/link/playlist/ GET id (string), quality (string), limit (int) quality=HI_RES_LOSSLESS, limit=500 JSON with all playlist track URLs
+/downloadv2/link/multi/ GET ids (string), quality (string) quality=HI_RES_LOSSLESS JSON array of track URLs
+
+🔹 Utility Endpoint
+
+Endpoint Method Parameters Response
+/trackv2/check/ GET id (int) Shows which qualities are actually available for the track
+
+---
+
+🔍 Parameter Details
+
+Common Parameters (All Endpoints)
+
+Parameter Type Valid Values Description
+id int Any valid Tidal ID Track ID, Album ID, Artist ID, Video ID
+quality string HI_RES_LOSSLESS, LOSSLESS, HIGH, LOW Audio quality (case-sensitive)
+limit int 1-500 Maximum number of items to return/download
+offset int 0+ Pagination offset (for non-download endpoints)
+
+V2 Specific Parameters
+
+Parameter Type Valid Values Default Description
+show_all_qualities bool true, false false When true, returns all available qualities with their URLs
+ids (for multi) string Comma or plus separated Required Example: 123,456,789 or 123+456+789
+
+Playlist ID Format
+
+Version Format Example
+V1 & V2 UUID string abc12345-6789-def0-1234-56789abcdef0
+
+Album/Track/Artist ID Format
+
+Type Format Example
+Track Integer 495566820
+Album Integer 123456789
+Artist Integer 987654321
+Video Integer 111222333
+
+---
+
+📤 Response Formats
+
+V1 /download/link/ Response
 
 ```json
 {
@@ -120,106 +172,7 @@ Response:
 }
 ```
 
-Example:
-
-```bash
-curl "http://localhost:8000/download/link/?id=495566820&quality=LOSSLESS"
-```
-
----
-
-/download/album/ - Download Entire Album
-
-```http
-GET /download/album/?id={album_id}&quality={quality}
-```
-
-Parameter Type Default Description
-id int Required Album ID
-quality string HI_RES_LOSSLESS Audio quality for all tracks
-
-How it works:
-
-1. Fetches all track IDs from album
-2. Downloads each track with specified quality
-3. Packages into ZIP archive
-
-Response: ZIP file named album_{id}.zip
-
-Example:
-
-```bash
-curl -O "http://localhost:8000/download/album/?id=123456789&quality=LOSSLESS"
-```
-
----
-
-/download/playlist/ - Download Playlist
-
-```http
-GET /download/playlist/?id={playlist_id}&quality={quality}&limit={limit}
-```
-
-Parameter Type Default Description
-id string Required Playlist UUID
-quality string HI_RES_LOSSLESS Audio quality
-limit int 500 Max tracks to download (1-500)
-
-Response: ZIP file named playlist_{id}.zip
-
-Example:
-
-```bash
-curl -O "http://localhost:8000/download/playlist/?id=abc123-def456&quality=LOSSLESS&limit=100"
-```
-
----
-
-/download/multi/ - Download Multiple Tracks
-
-```http
-GET /download/multi/?ids={track_ids}&quality={quality}
-```
-
-Parameter Type Default Description
-ids string Required Comma or plus separated track IDs
-quality string HI_RES_LOSSLESS Audio quality
-
-Response: ZIP file named tracks_{count}.zip
-
-Examples:
-
-```bash
-# Comma separated
-curl -O "http://localhost:8000/download/multi/?ids=123,456,789&quality=LOSSLESS"
-
-# Plus separated
-curl -O "http://localhost:8000/download/multi/?ids=123+456+789&quality=HIGH"
-```
-
----
-
-📥 V2 DOWNLOAD ENDPOINTS (token_hifi.json)
-
-Note: V2 uses Tidal's direct streamurl API which may return HIGHER quality than requested if HI_RES is available.
-
-/trackv2/ - Get Track Stream Info
-
-```http
-GET /trackv2/?id={track_id}&quality={quality}&show_all_qualities={bool}
-```
-
-Parameter Type Default Description
-id int Required Tidal track ID
-quality string HI_RES_LOSSLESS Requested quality
-show_all_qualities bool false Show all available qualities
-
-How it works:
-
-1. Calls tidal api
-2. Returns direct audio URL with actual quality
-
-Response (single quality):
+V2 /trackv2/ Response (Single Quality)
 
 ```json
 {
@@ -238,214 +191,38 @@ Response (single quality):
 }
 ```
 
-Response (all qualities):
+V2 /trackv2/ Response (show_all_qualities=true)
 
 ```json
 {
   "track_id": 495566820,
   "available_qualities": {
-    "HI_RES_LOSSLESS": {"available": true, "url": "...", "codec": "FLAC"},
-    "LOSSLESS": {"available": true, "url": "...", "codec": "FLAC"},
-    "HIGH": {"available": true, "url": "...", "codec": "AAC"},
-    "LOW": {"available": true, "url": "...", "codec": "AAC"}
+    "HI_RES_LOSSLESS": {
+      "available": true,
+      "url": "https://...",
+      "codec": "FLAC",
+      "actual_quality": "HI_RES_LOSSLESS"
+    },
+    "LOSSLESS": {
+      "available": true,
+      "url": "https://...",
+      "codec": "FLAC",
+      "actual_quality": "HI_RES_LOSSLESS"
+    },
+    "HIGH": {
+      "available": true,
+      "url": "https://...",
+      "codec": "AAC",
+      "actual_quality": "HIGH"
+    },
+    "LOW": {
+      "available": true,
+      "url": "https://...",
+      "codec": "AAC",
+      "actual_quality": "LOW"
+    }
   }
 }
-```
-
-Examples:
-
-```bash
-# Get best quality
-curl "http://localhost:8000/trackv2/?id=495566820"
-
-# Request specific quality
-curl "http://localhost:8000/trackv2/?id=495566820&quality=LOSSLESS"
-
-# Show all qualities
-curl "http://localhost:8000/trackv2/?id=495566820&show_all_qualities=true"
-```
-
----
-
-/trackv2/quality/ - Get Specific Quality
-
-```http
-GET /trackv2/quality/?id={track_id}&quality={quality}
-```
-
-Parameter Type Default Description
-id int Required Tidal track ID
-quality string HI_RES_LOSSLESS Exact quality to request
-
-Response: Same as /trackv2/ single quality format
-
-Example:
-
-```bash
-curl "http://localhost:8000/trackv2/quality/?id=495566820&quality=LOSSLESS"
-```
-
----
-
-/downloadv2/ - Download Track
-
-```http
-GET /downloadv2/?id={track_id}&quality={quality}
-```
-
-Parameter Type Default Description
-id int Required Tidal track ID
-quality string HI_RES_LOSSLESS Requested quality
-
-Response: Audio file (FLAC or M4A)
-
-Example:
-
-```bash
-curl -O "http://localhost:8000/downloadv2/?id=495566820&quality=LOSSLESS"
-```
-
----
-
-/downloadv2/link/ - Get Download Link (JSON)
-
-```http
-GET /downloadv2/link/?id={track_id}&quality={quality}
-```
-
-Parameter Type Default Description
-id int Required Tidal track ID
-quality string HI_RES_LOSSLESS Requested quality
-
-Response: Same structure as /download/link/ (V1 format)
-
-Example:
-
-```bash
-curl "http://localhost:8000/downloadv2/link/?id=495566820&quality=LOSSLESS"
-```
-
----
-
-/downloadv2/album/ - Download Album
-
-```http
-GET /downloadv2/album/?id={album_id}&quality={quality}
-```
-
-Parameter Type Default Description
-id int Required Album ID
-quality string HI_RES_LOSSLESS Quality for all tracks
-
-Response: ZIP file named album_{id}_{quality}.zip
-
-Example:
-
-```bash
-curl -O "http://localhost:8000/downloadv2/album/?id=123456789&quality=LOSSLESS"
-```
-
----
-
-/downloadv2/playlist/ - Download Playlist
-
-```http
-GET /downloadv2/playlist/?id={playlist_id}&quality={quality}&limit={limit}
-```
-
-Parameter Type Default Description
-id string Required Playlist UUID
-quality string HI_RES_LOSSLESS Audio quality
-limit int 500 Max tracks (1-500)
-
-Response: ZIP file named playlist_{id}_{quality}.zip
-
-Example:
-
-```bash
-curl -O "http://localhost:8000/downloadv2/playlist/?id=abc123&quality=LOSSLESS&limit=100"
-```
-
----
-
-/downloadv2/multi/ - Download Multiple Tracks
-
-```http
-GET /downloadv2/multi/?ids={track_ids}&quality={quality}
-```
-
-Parameter Type Default Description
-ids string Required Comma or plus separated IDs
-quality string HI_RES_LOSSLESS Audio quality
-
-Response: ZIP file named tracks_{count}_{quality}.zip
-
-Example:
-
-```bash
-curl -O "http://localhost:8000/downloadv2/multi/?ids=123,456,789&quality=LOSSLESS"
-```
-
----
-
-/downloadv2/link/album/ - Get Album Links (JSON)
-
-```http
-GET /downloadv2/link/album/?id={album_id}&quality={quality}
-```
-
-Response:
-
-```json
-{
-  "album_id": 123456789,
-  "requested_quality": "LOSSLESS",
-  "tracks": [
-    {
-      "track_id": 123,
-      "title": "Track 1",
-      "artist": "Artist",
-      "quality": "HI_RES_LOSSLESS",
-      "url": "https://..."
-    }
-  ]
-}
-```
-
----
-
-/downloadv2/link/playlist/ - Get Playlist Links (JSON)
-
-```http
-GET /downloadv2/link/playlist/?id={playlist_id}&quality={quality}&limit={limit}
-```
-
-Response: JSON with all playlist track URLs
-
----
-
-/downloadv2/link/multi/ - Get Multiple Links (JSON)
-
-```http
-GET /downloadv2/link/multi/?ids={track_ids}&quality={quality}
-```
-
-Response: JSON array of track URLs
-
----
-
-/trackv2/check/ - Check Available Qualities
-
-```http
-GET /trackv2/check/?id={track_id}
-```
-
-Response: Shows which qualities are actually available for the track
-
-Example:
-
-```bash
-curl "http://localhost:8000/trackv2/check/?id=495566820"
 ```
 
 ---
@@ -455,15 +232,15 @@ curl "http://localhost:8000/trackv2/check/?id=495566820"
 Feature V1 (/download/*) V2 (/downloadv2/*)
 Token File token.json token_hifi.json
 API Used playbackinfo + manifest streamurl direct
-Quality Control Exact requested quality May upgrade to higher
-Metadata Always included Included in /link/
-DASH Support Yes (segments) No (direct URL only)
+Quality Control Exact requested quality May upgrade to higher quality
+Metadata Always included Included in /link/ endpoints
+DASH Support ✅ Yes (segments) ❌ No (direct URL only)
 Speed Slower (manifest parsing) Faster (direct URL)
 Best For Exact quality control Best available quality
 
 ---
 
-💡 Quick Reference
+💡 Quick Reference Examples
 
 ```bash
 # V1 - Exact quality control
@@ -475,9 +252,63 @@ curl -O "http://localhost:8000/downloadv2/?id=123&quality=LOSSLESS"
 curl "http://localhost:8000/trackv2/?id=123&quality=LOSSLESS"
 curl "http://localhost:8000/trackv2/?id=123&show_all_qualities=true"
 
+# Check available qualities
+curl "http://localhost:8000/trackv2/check/?id=495566820"
+
 # Bulk downloads
 curl -O "http://localhost:8000/download/album/?id=456&quality=LOSSLESS"
-curl -O "http://localhost:8000/downloadv2/playlist/?id=abc&quality=HIGH&limit=50"
-curl -O "http://localhost:8000/download/multi/?ids=123,456,789"
+curl -O "http://localhost:8000/downloadv2/playlist/?id=abc123&quality=HIGH&limit=50"
+curl -O "http://localhost:8000/download/multi/?ids=123,456,789&quality=LOSSLESS"
+
+# Get download links as JSON
+curl "http://localhost:8000/downloadv2/link/album/?id=456&quality=LOSSLESS"
+curl "http://localhost:8000/downloadv2/link/playlist/?id=abc123&quality=HIGH"
 ```
 
+---
+
+🚀 Authentication Setup
+
+Generate V1 Token (token.json)
+
+```bash
+cd tidal_auth
+pip install -r requirements.txt
+python tidal_auth.py
+```
+
+Generate V2 Token (token_hifi.json)
+
+```bash
+python tidal_auth_hifi.py
+```
+
+Environment Variables (.env)
+
+```env
+CLIENT_ID=your_client_id
+CLIENT_SECRET=your_client_secret
+REFRESH_TOKEN=your_refresh_token
+USER_ID=your_user_id
+COUNTRY_CODE=US
+USE_PROXIES=False
+MAX_RETRIES=2
+```
+
+---
+
+📁 File Structure
+
+```
+ez-hifi-api/
+├── main.py                 # Main API server
+├── token.json              # V1 credentials
+├── token_hifi.json         # V2 credentials
+├── tidal_auth/
+│   ├── tidal_auth.py       # V1 token generator
+│   └── requirements.txt
+├── tidal_auth_hifi.py      # V2 token generator
+├── proxies.txt             # Optional proxy list
+├── .env                    # Environment variables
+└── requirements.txt        # Dependencies
+```
