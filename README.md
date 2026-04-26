@@ -1,6 +1,6 @@
 # ez-hifi-api
 
-<p align="center">Fork of<a href="https://github.com/binimum/hifi-api">hifi-api</a>.</p>
+<p align="center">Fork of<a href="https://github.com/binimum/hifi-api"> hifi-api</a>.</p>
 
 `hifi-api` is forked from the original project [sachinsenal0x64/hifi](https://github.com/sachinsenal0x64/hifi).
 
@@ -75,7 +75,7 @@ quality string HI_RES_LOSSLESS Audio quality (HI_RES_LOSSLESS, LOSSLESS, HIGH, L
 
 How it works:
 
-1. Calls https://api.tidal.com/v1/tracks/{id}/playbackinfo
+1. Calls tidal api
 2. Receives base64 encoded manifest
 3. Decodes manifest (JSON or XML/DASH)
 4. Extracts audio URL for requested quality
@@ -216,7 +216,7 @@ show_all_qualities bool false Show all available qualities
 
 How it works:
 
-1. Calls https://api.tidal.com/v1/tracks/{id}/streamurl
+1. Calls tidal api
 2. Returns direct audio URL with actual quality
 
 Response (single quality):
