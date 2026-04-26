@@ -73,14 +73,17 @@ Quality Parameter Value Bitrate/Format Description
 🔹 Single Track  
 
 Endpoint Method Parameters Default Response  
-/download/ GET id (int), quality (string) quality=HI_RES_LOSSLESS Audio file (FLAC/M4A)  
+/download/ GET id (int), quality (string) quality=HI_RES_LOSSLESS Audio file (FLAC/M4A) 
+
 /download/link/ GET id (int), quality (string) quality=HI_RES_LOSSLESS JSON with download URL + metadata  
 
 🔹 Bulk Downloads  
 
 Endpoint Method Parameters Default Response  
 /download/album/ GET id (int), quality (string) quality=HI_RES_LOSSLESS ZIP file (album_{id}.zip)  
+
 /download/playlist/ GET id (string), quality (string), limit (int) quality=HI_RES_LOSSLESS, limit=500 ZIP file (playlist_{id}.zip)  
+
 /download/multi/ GET ids (string), quality (string) quality=HI_RES_LOSSLESS ZIP file (tracks_{count}.zip)  
 
 Note for /download/multi/: Accepts comma-separated (123,456,789) or plus-separated (123+456+789) track IDs.  
@@ -94,23 +97,30 @@ Note for /download/multi/: Accepts comma-separated (123,456,789) or plus-separat
 🔹 Single Track
 
 Endpoint Method Parameters Default Response  
-/trackv2/ GET id (int), quality (string), show_all_qualities (bool) quality=HI_RES_LOSSLESS, show_all_qualities=false JSON (single or all qualities)  
-/trackv2/quality/ GET id (int), quality (string) quality=HI_RES_LOSSLESS JSON with specific quality  
-/downloadv2/ GET id (int), quality (string) quality=HI_RES_LOSSLESS Audio file (FLAC/M4A)  
+/trackv2/ GET id (int), quality (string), show_all_qualities (bool) quality=HI_RES_LOSSLESS, show_all_qualities=false JSON (single or all qualities) 
+
+/trackv2/quality/ GET id (int), quality (string) quality=HI_RES_LOSSLESS JSON with specific quality 
+
+/downloadv2/ GET id (int), quality (string) quality=HI_RES_LOSSLESS Audio file (FLAC/M4A) 
+
 /downloadv2/link/ GET id (int), quality (string) quality=HI_RES_LOSSLESS JSON with download URL + metadata  
 
 🔹 Bulk Downloads  
 
 Endpoint Method Parameters Default Response  
-/downloadv2/album/ GET id (int), quality (string) quality=HI_RES_LOSSLESS ZIP file (album_{id}_{quality}.zip)  
+/downloadv2/album/ GET id (int), quality (string) quality=HI_RES_LOSSLESS ZIP file (album_{id}_{quality}.zip)
+
 /downloadv2/playlist/ GET id (string), quality (string), limit (int) quality=HI_RES_LOSSLESS, limit=500 ZIP file (playlist_{id}_{quality}.zip)  
+
 /downloadv2/multi/ GET ids (string), quality (string) quality=HI_RES_LOSSLESS ZIP file (tracks_{count}_{quality}.zip)  
 
 🔹 JSON Link Endpoints (Bulk)
 
 Endpoint Method Parameters Default Response  
-/downloadv2/link/album/ GET id (int), quality (string) quality=HI_RES_LOSSLESS JSON with all album track URLs  
+/downloadv2/link/album/ GET id (int), quality (string) quality=HI_RES_LOSSLESS JSON with all album track URLs
+
 /downloadv2/link/playlist/ GET id (string), quality (string), limit (int) quality=HI_RES_LOSSLESS, limit=500 JSON with all playlist track URLs  
+
 /downloadv2/link/multi/ GET ids (string), quality (string) quality=HI_RES_LOSSLESS JSON array of track URLs  
 
 🔹 Utility Endpoint  
@@ -126,19 +136,21 @@ Common Parameters (All Endpoints)
 
 Parameter Type Valid Values Description  
 id int Any valid Tidal ID Track ID, Album ID, Artist ID, Video ID  
+
 quality string HI_RES_LOSSLESS, LOSSLESS, HIGH, LOW Audio quality (case-sensitive)  
+
 limit int 1-500 Maximum number of items to return/download  
+
 offset int 0+ Pagination offset (for non-download endpoints)  
 
 V2 Specific Parameters  
 
 Parameter Type Valid Values Default Description  
 show_all_qualities bool true, false false When true, returns all available qualities with their URLs  
+
 ids (for multi) string Comma or plus separated Required Example: 123,456,789 or 123+456+789  
 
 Playlist ID Format  
-
-Version Format Example
 V1 & V2 UUID string abc12345-6789-def0-1234-56789abcdef0  
 
 Album/Track/Artist ID Format  
